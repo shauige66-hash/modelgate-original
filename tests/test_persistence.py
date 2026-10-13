@@ -11,7 +11,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.repository import CallRecordRepository, NewCallRecord
+from app.db.repository import CallRecordRepository, NewCallRecord, UsageFilter
 from app.errors import ErrorType
 from tests.conftest import SAMPLE_COMPLETION_WITHOUT_USAGE
 
@@ -174,7 +174,7 @@ class TestUsageTotals:
         await db_session.commit()
 
         since = datetime.now(timezone.utc) - timedelta(hours=1)
-        totals = await repository.usage_totals(since=since)
+        totals = await repository.usage_totals(UsageFilter(since=since))
 
         assert totals.total_requests == 1
 
@@ -184,7 +184,7 @@ class TestUsageTotals:
         await repository.insert(_success_record("req_b", model="deepseek-reasoner"))
         await db_session.commit()
 
-        totals = await repository.usage_totals(model="deepseek-reasoner")
+        totals = await repository.usage_totals(UsageFilter(model="deepseek-reasoner"))
 
         assert totals.total_requests == 1
 
@@ -199,7 +199,7 @@ class TestUsageByModel:
 
         rows = await repository.usage_by_model()
 
-        by_name = {row.model: row for row in rows}
+        by_name = {row.key: row for row in rows}
         assert by_name["deepseek-chat"].total_requests == 2
         assert by_name["deepseek-reasoner"].total_requests == 1
 

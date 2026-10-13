@@ -68,7 +68,7 @@ class TestUpstreamHttpErrors:
         [
             (401, ErrorType.UPSTREAM_AUTH_ERROR),
             (403, ErrorType.UPSTREAM_AUTH_ERROR),
-            (429, ErrorType.UPSTREAM_HTTP_ERROR),
+            (429, ErrorType.UPSTREAM_RATE_LIMITED),
             (500, ErrorType.UPSTREAM_HTTP_ERROR),
             (503, ErrorType.UPSTREAM_HTTP_ERROR),
         ],
@@ -123,21 +123,22 @@ class TestUpstreamInvalidResponse:
         )
 
 
-class TestUpstreamNotConfigured:
-    async def test_missing_upstream_key_returns_503(self, make_harness) -> None:
-        """服务端没配上游密钥时给出明确提示，而不是抛 500。"""
+class TestProviderNotConfigured:
+    async def test_missing_provider_key_returns_503(self, make_harness) -> None:
+        """服务商未配置 Key 时返回明确错误，且请求不会发往任何上游。"""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=SAMPLE_COMPLETION)
 
-        # 未配置上游密钥
-        h = await make_harness(handler, settings=build_settings(upstream_api_key=""))
+        h = await make_harness(handler, settings=build_settings(deepseek_api_key=""))
         response = await h.client.post(CHAT_URL, json=_chat_payload())
 
         assert response.status_code == 503
         assert (
             response.json()["error"]["type"] == ErrorType.UPSTREAM_NOT_CONFIGURED.value
         )
+        # 未配置凭证时不得发出任何上游请求
+        assert h.upstream_requests == []
 
 
 class TestConcurrencyLimiterReleasesSlots:

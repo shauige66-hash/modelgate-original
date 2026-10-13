@@ -63,7 +63,7 @@ class TestUsageEndpointBasics:
         assert isinstance(cost, str)
         # 12 * 0.27/1e6 + 8 * 1.10/1e6 = 0.00000324 + 0.0000088
         # -> 量化到 6 位小数：0.000012
-        assert Decimal(cost) == Decimal("0.000012")
+        assert Decimal(cost) == Decimal("0.000009")
         assert body["totals"]["price_unit"] == "USD per 1,000,000 tokens"
 
     async def test_failure_count_and_error_breakdown(self, make_harness) -> None:
@@ -184,7 +184,7 @@ class TestModelFilterIsConsistent:
         assert body["totals"]["total_requests"] == 2
         assert body["totals"]["success_count"] == 1
         assert body["totals"]["failure_count"] == 1
-        assert body["range"]["model_filter"] == "deepseek-chat"
+        assert body["filters"]["model"] == "deepseek-chat"
 
     async def test_filter_narrows_by_model(self, harness) -> None:
         """by_model 必须只包含被筛选的模型（修复前会返回全部模型）。"""
@@ -197,10 +197,10 @@ class TestModelFilterIsConsistent:
         ).json()
 
         assert len(body["by_model"]) == 1
-        assert body["by_model"][0]["model"] == "deepseek-chat"
+        assert body["by_model"][0]["key"] == "deepseek-chat"
         assert body["by_model"][0]["total_requests"] == 2
         # 不允许出现另一个模型
-        assert all(item["model"] != "deepseek-reasoner" for item in body["by_model"])
+        assert all(item["key"] != "deepseek-reasoner" for item in body["by_model"])
 
     async def test_filter_narrows_errors(self, harness) -> None:
         """errors 必须只包含被筛选模型的错误（修复前会混入其他模型的错误）。"""
@@ -242,7 +242,7 @@ class TestModelFilterIsConsistent:
 
         body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
 
-        models = {item["model"] for item in body["by_model"]}
+        models = {item["key"] for item in body["by_model"]}
         assert models == {"deepseek-chat", "deepseek-reasoner"}
         assert body["totals"]["total_requests"] == 5
 
@@ -301,6 +301,98 @@ class TestUsageEndpointGrouping:
         response = await h.client.get(f"{ADMIN_URL}?top_errors=0", headers=ADMIN_HEADERS)
 
         assert response.json()["errors"] == []
+
+
+class TestUsageEndpointProviderGrouping:
+    """按服务商分组的统计。"""
+
+    async def _seed_two_providers(self, harness) -> None:
+        await harness.client.post(CHAT_URL, json={"model": "deepseek-chat", **_payload()})
+        await harness.client.post(CHAT_URL, json={"model": "gpt-4o-mini", **_payload()})
+
+    async def test_by_provider_splits_records(self, harness) -> None:
+        await self._seed_two_providers(harness)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        by_provider = {item["key"]: item for item in body["by_provider"]}
+        assert set(by_provider) == {"deepseek", "openai"}
+        assert by_provider["deepseek"]["total_requests"] == 1
+        assert by_provider["openai"]["total_requests"] == 1
+
+    async def test_provider_filter_narrows_all_sections(self, harness) -> None:
+        """provider 筛选要同时作用于 totals / by_provider / by_model。"""
+        await self._seed_two_providers(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?provider=openai", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        assert body["filters"]["provider"] == "openai"
+        assert body["totals"]["total_requests"] == 1
+        assert len(body["by_provider"]) == 1
+        assert body["by_provider"][0]["key"] == "openai"
+        assert all(item["key"] != "deepseek-chat" for item in body["by_model"])
+
+    async def test_costs_are_per_provider(self, harness) -> None:
+        """不同服务商单价不同，分组成本必须各算各的。"""
+        await self._seed_two_providers(harness)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        by_provider = {item["key"]: item for item in body["by_provider"]}
+        assert Decimal(by_provider["deepseek"]["estimated_cost_usd"]) == Decimal(
+            "0.000009"
+        )
+        assert Decimal(by_provider["openai"]["estimated_cost_usd"]) == Decimal(
+            "0.000066"
+        )
+
+    async def test_group_by_provider_can_be_disabled(self, harness) -> None:
+        await self._seed_two_providers(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?group_by_provider=false", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        assert body["by_provider"] == []
+
+    async def test_by_provider_rows_include_token_totals(self, harness) -> None:
+        await self._seed_two_providers(harness)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        for item in body["by_provider"]:
+            assert item["total_tokens"] == item["prompt_tokens"] + item[
+                "completion_tokens"
+            ]
+
+
+class TestAverageLatency:
+    async def test_avg_latency_reported_when_samples_exist(self, harness) -> None:
+        await _seed(harness, 2)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        assert body["totals"]["avg_latency_ms"] is not None
+        assert body["totals"]["avg_latency_ms"] >= 0
+
+    async def test_avg_latency_is_null_without_samples(self, harness) -> None:
+        """没有记录时平均耗时是未知，不是 0。"""
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        assert body["totals"]["avg_latency_ms"] is None
+
+    async def test_group_rows_report_avg_latency(self, harness) -> None:
+        await _seed(harness, 1)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        assert body["by_model"][0]["avg_latency_ms"] is not None
 
 
 class TestUsageEndpointTimeRange:

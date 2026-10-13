@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from tests.conftest import SAMPLE_COMPLETION, UPSTREAM_KEY
+from tests.conftest import SAMPLE_COMPLETION, DEEPSEEK_KEY
 
 
 class TestHealth:
@@ -18,16 +18,37 @@ class TestHealth:
     async def test_readiness_reports_database_and_concurrency(
         self, client: httpx.AsyncClient
     ) -> None:
-        """/health/ready 报告数据库状态与并发水位。"""
+        """/health/ready 报告数据库状态、服务商配置与并发水位。"""
         response = await client.get("/health/ready")
 
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
         assert body["database"]["ok"] is True
-        assert body["upstream_configured"] is True
+        assert body["providers"]["registered"] == ["deepseek", "openai"]
+        assert body["providers"]["configured"] == ["deepseek", "openai"]
         assert body["concurrency"]["limit"] == 4
         assert body["concurrency"]["in_flight"] == 0
+
+    async def test_providers_endpoint_lists_registered_models(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """/health/providers 只暴露模型名与服务商，不含凭证。"""
+        response = await client.get("/health/providers")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["default_model"] == "deepseek-chat"
+
+        by_model = {item["model"]: item for item in body["models"]}
+        assert by_model["deepseek-chat"]["provider"] == "deepseek"
+        assert by_model["gpt-4o-mini"]["provider"] == "openai"
+        assert by_model["deepseek-chat"]["pricing_configured"] is True
+
+        text = response.text
+        assert DEEPSEEK_KEY not in text
+        assert "api.openai.com" not in text
+        assert "api.deepseek.com" not in text
 
 
 class TestChatCompletionsProxy:
@@ -65,7 +86,7 @@ class TestChatCompletionsProxy:
         request = upstream_requests[0]
 
         assert request.url.path == "/chat/completions"
-        assert request.headers["Authorization"] == f"Bearer {UPSTREAM_KEY}"
+        assert request.headers["Authorization"] == f"Bearer {DEEPSEEK_KEY}"
 
         import json
 
@@ -80,7 +101,7 @@ class TestChatCompletionsProxy:
         auth_headers: dict[str, str],
         upstream_requests: list[httpx.Request],
     ) -> None:
-        """客户端不传 model 时，使用服务端配置的 UPSTREAM_MODEL。"""
+        """客户端不传 model 时，使用服务端配置的 DEFAULT_MODEL_NAME。"""
         await client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},

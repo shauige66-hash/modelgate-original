@@ -9,8 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.cost import calculate_cost, estimate_cost_for_settings, quantize_cost
-from tests.conftest import build_settings
+from app.cost import calculate_cost, quantize_cost
 
 # 测试用单价：输入 1 美元 / 百万，输出 2 美元 / 百万，
 # 便于心算核对结果。
@@ -156,25 +155,25 @@ class TestQuantizeCost:
         assert quantize_cost(Decimal("1")) == Decimal("1.000000")
 
 
-class TestEstimateCostForSettings:
-    def test_uses_settings_prices(self) -> None:
-        """按配置单价计算：输入 0.27、输出 1.10（美元/百万 Token）。"""
-        settings = build_settings(
-            price_input_per_million_usd=Decimal("0.27"),
-            price_output_per_million_usd=Decimal("1.10"),
-        )
-
-        result = estimate_cost_for_settings(
-            settings, prompt_tokens=1_000_000, completion_tokens=1_000_000
-        )
-
-        assert result == Decimal("1.370000")
-
-    def test_unknown_usage_gives_none(self) -> None:
-        settings = build_settings()
-
-        result = estimate_cost_for_settings(
-            settings, prompt_tokens=None, completion_tokens=None
+class TestUnknownPricing:
+    def test_missing_price_yields_none_not_zero(self) -> None:
+        """价格未配置时必须返回 None，不能当作免费。"""
+        result = calculate_cost(
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+            input_price_per_million=None,
+            output_price_per_million=None,
         )
 
         assert result is None
+
+    def test_partial_pricing_only_counts_known_side(self) -> None:
+        """只有输入价时，仅按输入侧估算，不虚构输出侧成本。"""
+        result = calculate_cost(
+            prompt_tokens=1_000_000,
+            completion_tokens=1_000_000,
+            input_price_per_million=Decimal("1"),
+            output_price_per_million=None,
+        )
+
+        assert result == Decimal("1.000000")

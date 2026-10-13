@@ -111,13 +111,13 @@ class TestSecretsNeverLeak:
         chat_payload: dict,
     ) -> None:
         """上游密钥不得出现在返回给客户端的内容里。"""
-        from tests.conftest import UPSTREAM_KEY
+        from tests.conftest import DEEPSEEK_KEY
 
         response = await client.post(
             "/v1/chat/completions", json=chat_payload, headers=auth_headers
         )
 
-        assert UPSTREAM_KEY not in response.text
+        assert DEEPSEEK_KEY not in response.text
 
     async def test_admin_key_never_echoed(
         self, client: httpx.AsyncClient, admin_headers: dict[str, str]

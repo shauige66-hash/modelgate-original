@@ -14,7 +14,7 @@ import pytest
 from app.redaction import redact_secrets
 from tests.conftest import (
     SAMPLE_COMPLETION,
-    UPSTREAM_KEY,
+    DEEPSEEK_KEY,
     build_settings,
 )
 
@@ -32,7 +32,7 @@ SENSITIVE_UPSTREAM_BODY = {
         "code": "invalid_api_key",
         # 上游有时还会回显请求上下文
         "request_id": "upstream-req-abc123",
-        "authorization": f"Bearer {UPSTREAM_KEY}",
+        "authorization": f"Bearer {DEEPSEEK_KEY}",
         "internal_host": "upstream-internal-01.corp.local",
     }
 }
@@ -67,7 +67,7 @@ class TestUpstreamErrorIsSanitized:
         assert "api key" not in body.lower()
         assert "invalid_api_key" not in body
         # 我们自己的上游密钥也不能出现
-        assert UPSTREAM_KEY not in body
+        assert DEEPSEEK_KEY not in body
         # 上游内部信息不能外泄
         assert "upstream-internal-01" not in body
         assert "upstream-req-abc123" not in body
@@ -96,8 +96,15 @@ class TestUpstreamErrorIsSanitized:
 
         assert response.status_code == 502
         assert FAKE_LEAKED_KEY not in body
-        assert UPSTREAM_KEY not in body
-        assert response.json()["error"]["message"] == f"上游模型服务返回 {status_code}"
+        assert DEEPSEEK_KEY not in body
+
+        # 429 使用专门的限流文案，其余仍走固定描述
+        expected = (
+            f"上游触发限流（HTTP {status_code}），请稍后重试"
+            if status_code == 429
+            else f"上游模型服务返回 {status_code}"
+        )
+        assert response.json()["error"]["message"] == expected
 
     async def test_sanitized_for_non_json_upstream_error_too(
         self, make_harness
@@ -145,7 +152,7 @@ class TestSecurityNoteIsLoggedButRedacted:
         assert "401" in log_text
         # 但绝不能出现完整密钥
         assert FAKE_LEAKED_KEY not in log_text
-        assert UPSTREAM_KEY not in log_text
+        assert DEEPSEEK_KEY not in log_text
         # 应该出现脱敏标记
         assert "REDACTED" in log_text
 
@@ -220,16 +227,16 @@ class TestSettingsNeverExposeUpstreamKey:
             # 模拟上游把收到的 Authorization 原样回显
             return httpx.Response(
                 401,
-                json={"error": {"message": f"bad credentials: Bearer {UPSTREAM_KEY}"}},
+                json={"error": {"message": f"bad credentials: Bearer {DEEPSEEK_KEY}"}},
             )
 
         h = await make_harness(handler)
         response = await h.client.post(CHAT_URL, json=_chat_payload())
 
-        assert UPSTREAM_KEY not in response.text
+        assert DEEPSEEK_KEY not in response.text
 
     def test_build_settings_masks_key_in_repr(self) -> None:
         """配置对象的 repr 不能暴露上游密钥。"""
         settings = build_settings()
 
-        assert UPSTREAM_KEY not in repr(settings)
+        assert DEEPSEEK_KEY not in repr(settings)
