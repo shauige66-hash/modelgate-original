@@ -29,7 +29,7 @@ class ChatCompletionRequest(BaseModel):
 
     model: str | None = Field(
         default=None,
-        description="留空则使用服务端配置的 UPSTREAM_MODEL",
+        description="留空则使用服务端配置的 DEFAULT_MODEL_NAME",
     )
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False

@@ -9,25 +9,25 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-import httpx
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.budget import BudgetGuard
 from app.concurrency import ConcurrencyLimiter
 from app.config import Settings
-from app.upstream import ChatCompletionsClient
+from app.provider_pool import ProviderPool
 
 
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_http_client(request: Request) -> httpx.AsyncClient:
-    return request.app.state.http_client
+def get_provider_pool(request: Request) -> ProviderPool:
+    return request.app.state.provider_pool
 
 
-def get_upstream_client(request: Request) -> ChatCompletionsClient:
-    return request.app.state.upstream_client
+def get_budget_guard(request: Request) -> BudgetGuard:
+    return request.app.state.budget_guard
 
 
 def get_limiter(request: Request) -> ConcurrencyLimiter:

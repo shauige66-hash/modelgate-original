@@ -11,14 +11,25 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.agent_tracking import InvalidTrackingHeaderError
 from app.api.routes import admin, chat, health
+from app.budget import BudgetGuard, BudgetLimits
 from app.concurrency import ConcurrencyLimiter
 from app.config import Settings, get_settings
+from app.db.budget_repository import BudgetExceededError
 from app.db.session import create_engine, create_session_factory, dispose_engine, init_models
-from app.errors import GatewayError, gateway_error_handler
+from app.errors import (
+    GatewayError,
+    gateway_error_handler,
+    invalid_tracking_header_handler,
+    provider_not_configured_handler,
+    quota_exceeded_handler,
+    unknown_model_handler,
+)
 from app.logging_config import configure_logging, get_logger
+from app.provider_pool import build_provider_pool
+from app.providers import ProviderNotConfiguredError, UnknownModelError
 from app.request_context import get_request_id
-from app.upstream import ChatCompletionsClient, create_http_client
 
 logger = get_logger(__name__)
 
@@ -27,20 +38,11 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """创建并释放进程级共享资源。
 
-    数据库引擎与 HTTP 客户端在这里各创建一次、全程复用，
+    数据库引擎与各服务商的 HTTP 客户端在这里各创建一次、全程复用，
     退出时统一关闭，避免连接泄漏。
     """
     settings: Settings = app.state.settings
     configure_logging(settings.log_level)
-
-    logger.info(
-        "启动 %s v%s | 并发上限=%s | 上游=%s | 模型=%s",
-        settings.app_name,
-        settings.app_version,
-        settings.max_concurrent_requests,
-        settings.upstream_base_url,
-        settings.upstream_model,
-    )
 
     engine = create_engine(settings)
     app.state.db_engine = engine
@@ -53,20 +55,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 便于区分「应用没起来」和「数据库没就绪」。
         logger.error("初始化数据库失败，服务将以降级状态启动 | %s", exc)
 
-    http_client = create_http_client(settings)
-    app.state.http_client = http_client
-    app.state.upstream_client = ChatCompletionsClient(http_client, settings)
+    pool = build_provider_pool(settings)
+    app.state.provider_pool = pool
+
+    logger.info(
+        "启动 %s v%s | 并发上限=%s | 模型=%s | 已配置服务商=%s",
+        settings.app_name,
+        settings.app_version,
+        settings.max_concurrent_requests,
+        ", ".join(pool.router.registered_models),
+        ", ".join(pool.router.configured_providers()) or "无",
+    )
 
     app.state.limiter = ConcurrencyLimiter(
         limit=settings.max_concurrent_requests,
         acquire_timeout=settings.concurrency_acquire_timeout_seconds,
     )
 
+    budget_guard = BudgetGuard(
+        session_factory=app.state.session_factory,
+        limits=BudgetLimits(settings),
+    )
+    app.state.budget_guard = budget_guard
+
+    if budget_guard.enabled:
+        limits = budget_guard.limits
+        logger.info(
+            "配额已启用 | 客户端当日=%s | 单 Run=%s",
+            limits.client_daily_requests or "不限",
+            limits.run_max_requests or "不限",
+        )
+
     try:
         yield
     finally:
         logger.info("正在关闭 %s ...", settings.app_name)
-        await http_client.aclose()
+        await pool.aclose()
         await dispose_engine(engine)
 
 
@@ -109,6 +133,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     app.add_exception_handler(GatewayError, gateway_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(UnknownModelError, unknown_model_handler)
+    app.add_exception_handler(ProviderNotConfiguredError, provider_not_configured_handler)
+    app.add_exception_handler(InvalidTrackingHeaderError, invalid_tracking_header_handler)
+    app.add_exception_handler(BudgetExceededError, quota_exceeded_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health.router)

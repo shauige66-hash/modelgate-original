@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,12 +26,14 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.budget import BudgetGuard, BudgetLimits
 from app.config import Settings
 from app.concurrency import ConcurrencyLimiter
+from app.db.migrations import apply_additive_migrations
 from app.db.models import Base
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
-from app.upstream import ChatCompletionsClient
+from app.provider_pool import build_provider_pool
 from tests.db_safety import (
     UnsafeTestDatabaseError,
     assert_connected_database_is_test,
@@ -37,7 +42,8 @@ from tests.db_safety import (
 
 CLIENT_KEY = "sk-client-test-key"
 ADMIN_KEY = "sk-admin-test-key"
-UPSTREAM_KEY = "sk-upstream-test-key"
+DEEPSEEK_KEY = "sk-deepseek-test-key"
+OPENAI_KEY = "sk-openai-test-key"
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")
 
@@ -96,11 +102,25 @@ def build_settings(**overrides: Any) -> Settings:
     """构造测试配置。
 
     传入 _env_file=None，避免测试机器上的 .env 影响结果。
+    默认登记 deepseek 与 openai 两个服务商，两者都带上假 Key，
+    这样路由与凭证隔离都能被真实覆盖。
     """
     values: dict[str, Any] = {
-        "upstream_base_url": "https://upstream.test",
-        "upstream_api_key": UPSTREAM_KEY,
-        "upstream_model": "deepseek-chat",
+        "deepseek_base_url": "https://deepseek.test",
+        "deepseek_api_key": DEEPSEEK_KEY,
+        "openai_base_url": "https://openai.test",
+        "openai_api_key": OPENAI_KEY,
+        "deepseek_price_input_per_million_usd": Decimal("0.20"),
+        "deepseek_price_output_per_million_usd": Decimal("0.80"),
+        "openai_price_input_per_million_usd": Decimal("1.50"),
+        "openai_price_output_per_million_usd": Decimal("6.00"),
+        "model_registry": [
+            "deepseek-chat:deepseek",
+            "deepseek-reasoner:deepseek",
+            "gpt-4o-mini:openai",
+        ],
+        "model_prices": [],
+        "default_model_name": "deepseek-chat",
         "upstream_timeout_seconds": 5.0,
         "max_concurrent_requests": 4,
         "concurrency_acquire_timeout_seconds": 1.0,
@@ -141,10 +161,51 @@ def _make_shared_memory_engine() -> AsyncEngine:
     )
 
 
+def _make_file_engine(db_path) -> AsyncEngine:
+    """构造文件型 SQLite 引擎，用于需要多连接并发的用例。
+
+    WAL 让读写不互相阻塞，busy_timeout 让并发写入排队等待而不是直接报
+    'database is locked'。这两项只为测试服务，生产用的是 PostgreSQL。
+    """
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path.as_posix()}",
+        echo=False,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
+    return engine
+
+
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     """SQLite 内存数据库引擎（单元测试默认使用）。"""
     engine = _make_shared_memory_engine()
+    await _prepare_database(engine)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def file_engine(tmp_path) -> AsyncIterator[AsyncEngine]:
+    """文件型 SQLite 引擎。
+
+    内存库用 StaticPool 把所有连接拢到同一个连接上，
+    那样的「并发」其实是串行执行，验证不了行级竞争。
+    配额并发测试需要真正的多连接竞争，因此这里落盘。
+    """
+    engine = _make_file_engine(tmp_path / "concurrency.db")
     await _prepare_database(engine)
     try:
         yield engine
@@ -218,13 +279,16 @@ def upstream_requests() -> list[httpx.Request]:
 
 def _make_mock_upstream_client(
     *,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    timeout: float,
     handler: Callable[[httpx.Request], httpx.Response] | None,
-    settings: Settings,
     recorded: list[httpx.Request],
 ) -> httpx.AsyncClient:
     """构造带 MockTransport 的上游客户端。
 
-    带上与生产一致的 Authorization 头，这样「是否使用了配置的上游密钥」
+    带上与生产一致的 Authorization 头，这样「各服务商凭证是否隔离」
     才是一个有意义的断言。
     """
 
@@ -236,10 +300,33 @@ def _make_mock_upstream_client(
 
     return httpx.AsyncClient(
         transport=httpx.MockTransport(_handler),
-        base_url=settings.upstream_base_url,
-        timeout=settings.upstream_timeout_seconds,
-        headers={"Authorization": f"Bearer {settings.upstream_api_key_value}"},
+        base_url=base_url,
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {api_key}"},
     )
+
+
+def build_mock_providers(
+    settings: Settings,
+    recorded: list[httpx.Request],
+    handler: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> dict[str, httpx.AsyncClient]:
+    """为所有已登记服务商各建一个 Mock 客户端。
+
+    两个服务商返回同样的响应体；请求落到哪个上游由
+    TestHarness.requests_for(provider) 按 base_url 断言。
+    """
+    clients: dict[str, httpx.AsyncClient] = {}
+    for provider, (base_url, api_key) in settings.provider_credentials.items():
+        clients[provider] = _make_mock_upstream_client(
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=settings.upstream_timeout_seconds,
+            handler=handler,
+            recorded=recorded,
+        )
+    return clients
 
 
 # ---------------------------------------------------------------- 测试夹具
@@ -253,13 +340,13 @@ class TestHarness:
         *,
         settings: Settings,
         engine: AsyncEngine,
-        upstream_http_client: httpx.AsyncClient,
+        upstream_clients: dict[str, httpx.AsyncClient],
         client: httpx.AsyncClient,
         upstream_requests: list[httpx.Request],
     ) -> None:
         self.settings = settings
         self.engine = engine
-        self.upstream_http_client = upstream_http_client
+        self.upstream_clients = upstream_clients
         self.client = client
         self.upstream_requests = upstream_requests
         self.app = client._transport.app  # type: ignore[attr-defined]
@@ -272,32 +359,45 @@ class TestHarness:
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         return self.app.state.session_factory
 
+    @property
+    def pool(self):
+        return self.app.state.provider_pool
+
+    def requests_for(self, provider: str) -> list[httpx.Request]:
+        """该服务商收到的请求。用于验证凭证隔离与路由正确性。"""
+        host = httpx.URL(self.settings.provider_credentials[provider][0]).host
+        return [r for r in self.upstream_requests if r.url.host == host]
+
     async def aclose(self) -> None:
         await self.client.aclose()
-        await self.upstream_http_client.aclose()
+        for upstream in self.upstream_clients.values():
+            await upstream.aclose()
         await self.engine.dispose()
 
 
 def _build_test_app(
     *,
     settings: Settings,
-    upstream_http_client: httpx.AsyncClient,
     engine: AsyncEngine,
+    upstream_clients: dict[str, httpx.AsyncClient],
 ) -> Any:
     """构造已注入测试依赖的 app，不运行 lifespan。
 
-    lifespan 会连接真实数据库、创建真实 HTTP 客户端，
+    lifespan 会连接真实数据库、按配置新建 HTTP 客户端，
     测试改用内存 SQLite 与 MockTransport，因此手动组装 app.state。
     """
     app = create_app(settings)
     app.state.settings = settings
     app.state.db_engine = engine
     app.state.session_factory = create_session_factory(engine)
-    app.state.http_client = upstream_http_client
-    app.state.upstream_client = ChatCompletionsClient(upstream_http_client, settings)
+    app.state.provider_pool = build_provider_pool(settings, http_clients=upstream_clients)
     app.state.limiter = ConcurrencyLimiter(
         limit=settings.max_concurrent_requests,
         acquire_timeout=settings.concurrency_acquire_timeout_seconds,
+    )
+    app.state.budget_guard = BudgetGuard(
+        session_factory=app.state.session_factory,
+        limits=BudgetLimits(settings),
     )
     return app
 
@@ -321,20 +421,34 @@ async def make_harness(
         *,
         settings: Settings | None = None,
         authenticated: bool = True,
+        provider_clients: dict[str, httpx.AsyncClient] | None = None,
+        file_backed: bool = False,
     ) -> TestHarness:
+        """构造一个测试夹具。
+
+        file_backed=True 时用文件型 SQLite 与多连接池；
+        内存库的 StaticPool 只有一条连接，无法承载并发事务，
+        需要验证并发行为（如配额竞争）的用例必须打开它。
+        """
         settings = settings or build_settings()
 
-        engine = _make_shared_memory_engine()
+        if file_backed:
+            engine = _make_file_engine(
+                Path(tempfile.mkdtemp(prefix="modelgate-test-")) / "harness.db"
+            )
+        else:
+            engine = _make_shared_memory_engine()
         await _prepare_database(engine)
+        await apply_additive_migrations(engine)
 
-        upstream_http_client = _make_mock_upstream_client(
-            handler=handler, settings=settings, recorded=upstream_requests
+        upstream_clients = provider_clients or build_mock_providers(
+            settings, upstream_requests, handler
         )
 
         app = _build_test_app(
             settings=settings,
-            upstream_http_client=upstream_http_client,
             engine=engine,
+            upstream_clients=upstream_clients,
         )
 
         # 默认带合法客户端密钥；authenticated=False 时不带凭据，用于鉴权拒绝路径
@@ -352,7 +466,7 @@ async def make_harness(
         harness = TestHarness(
             settings=settings,
             engine=engine,
-            upstream_http_client=upstream_http_client,
+            upstream_clients=upstream_clients,
             client=client,
             upstream_requests=upstream_requests,
         )
@@ -370,25 +484,26 @@ async def make_harness(
 async def harness(
     make_harness: Callable[..., Awaitable[TestHarness]],
 ) -> TestHarness:
-    """默认夹具：上游固定返回 SAMPLE_COMPLETION，客户端带合法密钥。"""
+    """默认夹具：上游固定返回成功响应，客户端带合法密钥。"""
     return await make_harness()
 
 
 @pytest_asyncio.fixture
 async def app(engine: AsyncEngine, upstream_requests: list[httpx.Request]) -> Any:
     """默认测试应用（内存 SQLite + Mock 上游），供 client 夹具使用。"""
-    upstream_http_client = _make_mock_upstream_client(
-        handler=None, settings=build_settings(), recorded=upstream_requests
-    )
+    settings = build_settings()
+    await apply_additive_migrations(engine)
+    upstream_clients = build_mock_providers(settings, upstream_requests)
     app = _build_test_app(
-        settings=build_settings(),
-        upstream_http_client=upstream_http_client,
+        settings=settings,
         engine=engine,
+        upstream_clients=upstream_clients,
     )
     try:
         yield app
     finally:
-        await upstream_http_client.aclose()
+        for upstream in upstream_clients.values():
+            await upstream.aclose()
 
 
 @pytest_asyncio.fixture
