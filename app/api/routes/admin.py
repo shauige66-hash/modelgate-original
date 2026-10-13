@@ -1,12 +1,10 @@
-"""管理接口：GET /admin/usage。
+"""用量统计接口：GET /admin/usage。
 
 使用独立的管理密钥（X-Admin-Key），与客户端 API Key 分离。
 
-统计口径提醒：
-- Token 与成本只累加「已知」的数值，未知值不会被当成 0。
-- 因此 `records_with_unknown_tokens` / `records_without_cost`
-  用来告诉你这次统计里有多少条记录没有被计入汇总，
-  避免把不完整的数据误读成准确账单。
+Token 与成本只累加已知值，未知值不按 0 计入，
+因此响应附带 records_with_unknown_tokens / records_without_cost，
+避免把不完整的数据误读成准确账单。
 """
 
 from __future__ import annotations
@@ -28,11 +26,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _decimal_to_str(value: Decimal) -> str:
-    """金额用字符串返回。
-
-    JSON 的 number 在多数客户端会被解析成浮点，
-    直接用字符串可以保留精确的 Decimal 语义。
-    """
+    """金额以字符串返回，避免 JSON 数字在客户端被解析成浮点。"""
     return format(value, "f")
 
 
@@ -60,18 +54,22 @@ async def get_usage(
         description="返回前 N 个错误类型统计",
     ),
 ) -> dict[str, object]:
-    """返回调用次数、Token 总量、估算成本与失败数量。"""
+    """返回调用次数、Token 总量、估算成本与失败数量。
+
+    model 筛选对 totals / by_model / errors 三者**统一生效**，
+    避免出现「totals 是筛选后的数字，by_model 与 errors 却是全量」的不一致结果。
+    """
     since, until = _normalize_range(since, until)
     repository = CallRecordRepository(session)
 
     totals = await repository.usage_totals(since=since, until=until, model=model)
     errors = (
-        await repository.error_breakdown(since=since, until=until)
+        await repository.error_breakdown(since=since, until=until, model=model)
         if top_errors > 0
         else []
     )
     by_model = (
-        await repository.usage_by_model(since=since, until=until)
+        await repository.usage_by_model(since=since, until=until, model=model)
         if group_by_model
         else []
     )

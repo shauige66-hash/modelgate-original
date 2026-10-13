@@ -1,19 +1,9 @@
 """LLM 转发路由：POST /v1/chat/completions。
 
-一次请求的完整流程：
+流程：鉴权 → 取并发槽位 → 转发上游 → 提取 usage 估算成本 → 落库 → 返回响应体。
 
-1. 鉴权（依赖 require_client_api_key）
-2. 取并发槽位（ConcurrencyLimiter，带等待超时）
-3. 转发到上游（共享 httpx.AsyncClient）
-4. 提取 usage → Decimal 估算成本
-5. 落库调用记录（成功与失败都记录）
-6. 返回上游响应体
-
-设计取舍：
-- 落库失败不影响已经拿到的模型响应：记录错误日志后仍然返回 200。
-  理由是「审计数据丢失」不应该让用户白等一次模型推理。
-- 客户端取消（客户端断开）时，异常会继续向上抛，
-  但记录已经在 finally 中写入，避免统计漏账。
+落库失败只记日志、不改变已返回的响应：审计数据丢失不应让用户白等一次推理。
+客户端取消时记录仍会在 finally 中写入，避免统计漏账。
 """
 
 from __future__ import annotations
@@ -63,11 +53,9 @@ async def create_chat_completion(
 ) -> JSONResponse:
     """转发一次非流式 Chat Completions 请求。"""
     request_id = new_request_id()
-    # 让异常处理器也能带上同一个 request id
     set_request_id(request_id)
     model = payload.model or settings.upstream_model
 
-    # 只记录消息条数与字符数，不记录 Prompt 原文
     prompt_meta = summarize_prompt([m.model_dump() for m in payload.messages])
     client_ip = request.client.host if request.client else None
 
@@ -95,12 +83,11 @@ async def create_chat_completion(
         completion_tokens = upstream_result.completion_tokens
         http_status = upstream_result.status_code
 
-        # 上游返回的 model 可能与请求不同（例如别名），记录实际使用的模型
+        # 上游可能返回请求之外的模型名（别名），以实际使用的模型入库
         response_model = upstream_result.payload.get("model")
         if isinstance(response_model, str) and response_model:
             model = response_model
 
-        # 原样透传上游响应体
         return JSONResponse(
             status_code=http_status,
             content=upstream_result.payload,
@@ -113,13 +100,13 @@ async def create_chat_completion(
         raise
 
     except asyncio.CancelledError:
-        # 客户端主动断开：记录一笔再继续抛出，否则统计会漏掉这次调用
+        # 客户端断开：先留一条记录再抛出，否则这次调用不会计入统计
         error_type = ErrorType.CLIENT_CANCELLED
         http_status = 499  # Nginx 约定的「客户端关闭连接」
         logger.info("客户端取消请求 | request_id=%s", request_id)
         raise
 
-    except Exception as exc:  # noqa: BLE001 - 兜底，任何未预期异常都要留痕
+    except Exception as exc:  # noqa: BLE001
         error_type = ErrorType.INTERNAL_ERROR
         http_status = 500
         logger.exception("未预期异常 | request_id=%s | %s", request_id, exc)
@@ -159,14 +146,14 @@ async def _persist_call_record(
 ) -> None:
     """写入调用记录。
 
-    这里刻意吞掉数据库异常：记录失败不应该改变已经返回给客户端的响应。
-    代价是审计可能缺失，因此用 error 级别日志明确暴露出来。
+    数据库异常在这里被吞掉：记录失败不应改变已经返回给客户端的响应。
+    代价是审计可能缺失，因此用 error 级日志暴露出来。
     """
     try:
         repository = CallRecordRepository(session)
         await repository.insert(record)
         await session.commit()
-    except Exception as exc:  # noqa: BLE001 - 必须保证不影响主流程
+    except Exception as exc:  # noqa: BLE001
         logger.error(
             "调用记录写入失败（不影响本次响应）| request_id=%s | %s",
             request_id,
@@ -174,5 +161,5 @@ async def _persist_call_record(
         )
         try:
             await session.rollback()
-        except Exception:  # noqa: BLE001 - 回滚失败已无补救手段，只记录
+        except Exception:  # noqa: BLE001
             logger.error("回滚失败 | request_id=%s", request_id)

@@ -1,10 +1,6 @@
-"""并发控制测试。
+"""并发控制测试：单进程并发上限与等待超时。
 
-验证 asyncio.Semaphore 的单进程并发上限确实生效，以及等待超时的行为。
-
-说明：并发上限属于「进程内」保护。
-这里测的是 ConcurrencyLimiter 与 HTTP 层的协作，
-不代表多副本部署时的全局并发上限。
+测的是 ConcurrencyLimiter 与 HTTP 层的协作，不代表多副本部署的全局并发上限。
 """
 
 from __future__ import annotations

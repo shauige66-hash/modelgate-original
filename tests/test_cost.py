@@ -1,9 +1,6 @@
 """Token 成本计算测试。
 
-重点验证：
-1. 全程使用 Decimal，绝不出现 float。
-2. 上游未返回 usage 时记为未知（None），不当成 0。
-3. 每百万 Token 的换算结果正确。
+覆盖 Decimal 精度、百万 Token 换算，以及 usage 缺失时记为未知而非 0。
 """
 
 from __future__ import annotations

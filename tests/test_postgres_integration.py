@@ -1,15 +1,17 @@
-"""真实 PostgreSQL 集成测试。
+r"""真实 PostgreSQL 集成测试。
 
-默认跳过：只有设置了 TEST_DATABASE_URL 才会执行，
-因此在没有数据库的机器上 `pytest` 依然全绿。
+未设置 TEST_DATABASE_URL 时整体跳过。
 
-跑法（数据库由 Docker Compose 提供时）：
-    docker compose up -d db
-    set TEST_DATABASE_URL=postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate
-    pytest tests/test_postgres_integration.py -v
+破坏性：会 drop_all + create_all 重建 call_records 表。
+TEST_DATABASE_URL 指向的库名必须以 `_test` 结尾，否则导入阶段即报错
+（保护实现见 tests/db_safety.py）。使用独立的测试库：
 
-这些用例验证的是「生产用的 asyncpg + PostgreSQL」组合，
-而不是单元测试里的 SQLite —— 两者的 SQL 方言与类型行为并不完全一致。
+    docker compose exec db psql -U modelgate -d postgres -c "CREATE DATABASE modelgate_test;"
+    $env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate_test"
+    .\.venv\Scripts\python.exe -m pytest tests/test_postgres_integration.py -v
+
+这些用例覆盖生产实际使用的 asyncpg + PostgreSQL 组合，
+SQLite 与它的 SQL 方言及类型行为并不完全一致。
 """
 
 from __future__ import annotations

@@ -1,12 +1,10 @@
-"""数据访问层（仓储）。
+"""call_records 的数据访问层。
 
-把 SQL 集中在这里，路由层只调用语义化方法，便于阅读和单独测试。
+SQL 集中在这里，路由层只调用语义化方法。
 
-聚合口径的重要说明：
-SUM(prompt_tokens) 会跳过 NULL，因此「Token 总量」只累加已知值。
-如果有记录 Token 未知，total 会偏小 —— 这是刻意选择：
-把未知当 0 会让统计静默失真，因此额外暴露 records_with_unknown_tokens
-让调用方知道有多少条记录未计入。
+聚合口径：SUM() 会跳过 NULL，因此 Token 总量只累加已知值，
+有未知 Token 的记录时 total 会偏小。这是刻意选择 —— 把未知记成 0
+会让统计静默失真，所以额外返回 records_with_unknown_tokens 供调用方判断完整性。
 """
 
 from __future__ import annotations
@@ -82,10 +80,7 @@ class CallRecordRepository:
         self._session = session
 
     async def insert(self, record: NewCallRecord) -> CallRecord:
-        """插入一条调用记录并 flush 取得主键。
-
-        这里只 flush 不 commit，事务边界交给 session_scope 统一管理。
-        """
+        """插入一条记录并 flush 以取得主键，commit 由调用方决定。"""
         orm = CallRecord(
             request_id=record.request_id,
             model=record.model,
@@ -127,7 +122,7 @@ class CallRecordRepository:
         """汇总总调用次数、Token 总量、估算成本与失败数量。"""
         conditions = _time_conditions(since, until, model)
 
-        # 用 SUM(CASE WHEN ...) 一次扫描算出成功/失败，避免多条查询
+        # 用 SUM(CASE WHEN ...) 一次扫描同时算出成功与失败数，避免多条查询
         success_expr = func.sum(case((CallRecord.http_status < 400, 1), else_=0))
         failure_expr = func.sum(case((CallRecord.http_status >= 400, 1), else_=0))
         unknown_tokens_expr = func.sum(
@@ -171,7 +166,7 @@ class CallRecordRepository:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
-            # Decimal 可能来自数据库的 Numeric，统一转换避免出现 float
+            # 数据库 Numeric 可能返回 Decimal 以外的类型，统一转换
             estimated_cost_usd=Decimal(row[5] or 0),
             records_with_unknown_tokens=int(row[6] or 0),
             records_without_cost=int(row[7] or 0),
@@ -182,10 +177,15 @@ class CallRecordRepository:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
         limit: int = 20,
     ) -> list[ModelUsage]:
-        """按模型拆分统计。"""
-        conditions = _time_conditions(since, until, None)
+        """按模型拆分统计。
+
+        model 不为空时只统计该模型，保证与 usage_totals 的筛选口径一致
+        （否则 totals 是筛选后的数字，by_model 却是全量，两边对不上）。
+        """
+        conditions = _time_conditions(since, until, model)
 
         stmt = (
             select(
@@ -223,9 +223,13 @@ class CallRecordRepository:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
     ) -> list[ErrorBreakdown]:
-        """按错误类型统计失败次数，成功记录（none）不计入。"""
-        conditions = _time_conditions(since, until, None)
+        """按错误类型统计失败次数，成功记录（none）不计入。
+
+        model 不为空时只统计该模型的失败，保持与 totals / by_model 一致的口径。
+        """
+        conditions = _time_conditions(since, until, model)
         conditions.append(CallRecord.error_type != "none")
 
         stmt = (

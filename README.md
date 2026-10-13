@@ -289,6 +289,36 @@ docker compose down -v              # 停止并删除数据卷
 
 启动顺序由 healthcheck 保证：`db` 通过 `pg_isready` 后 `api` 才开始启动。
 
+### ⚠️ 默认凭据只适用于本机开发
+
+`docker-compose.yml` 与 `.env.example` 里的 `modelgate:modelgate`、`sk-client-local-dev-key`、
+`sk-admin-local-dev-key` 都是**本地开发占位值，强度极低**。
+
+为降低误暴露风险，两个端口都已限制为仅监听宿主机回环地址，局域网/公网无法直接访问：
+
+```yaml
+db:
+  ports:
+    - "127.0.0.1:5432:5432"    # 不用 "5432:5432"
+api:
+  ports:
+    - "127.0.0.1:8000:8000"    # 不用 "8000:8000"
+```
+
+`api` 之所以也必须收紧：默认的 `CLIENT_API_KEYS` / `ADMIN_API_KEY` 是弱占位值，
+若 `8000` 暴露到局域网，任何人都能拿默认 Key 调用网关、消耗你的模型额度，
+甚至通过 `/admin/usage` 读取你的用量统计。
+
+本机访问不受影响（`curl http://127.0.0.1:8000/health` 正常）。
+
+如果你要把服务放到本机以外的环境（局域网、云主机、CI runner），**必须**先做这三件事：
+
+1. 修改 `POSTGRES_PASSWORD`（不要再用 `modelgate`）
+2. 更换 `CLIENT_API_KEYS` 与 `ADMIN_API_KEY`（生成足够随机的值）
+3. 不要把 `.env` 提交到任何仓库（它已在 `.gitignore` 中）
+
+完成以上三步后，再把端口显式改回 `"8000:8000"` / `"5432:5432"` 对外提供服务。
+
 ---
 
 ## API 使用示例
@@ -449,26 +479,63 @@ pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -v
 ```
 
-默认结果：**92 passed, 9 skipped**。
+默认结果：**145 passed, 15 skipped**（共收集 160 个用例）。
 
-其中 9 个 skipped 是真实 PostgreSQL 集成测试（未设置 `TEST_DATABASE_URL` 时自动跳过）。
+跳过项需要外部环境：9 个 PostgreSQL 集成测试缺 `TEST_DATABASE_URL`，
+6 个容器集成测试缺 Docker 或真实上游 Key（详见对应章节）。
 
-**如果 Docker 与 PostgreSQL 正在运行**（推荐，能覆盖全部 101 个用例）：
+**如果 Docker + 专用测试库就绪**，先创建测试库（库名必须以 `_test` 结尾，见下一节）：
 
 ```powershell
 docker compose up -d --build
-$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate"
+docker compose exec db psql -U modelgate -d postgres -c "CREATE DATABASE modelgate_test;"
+
+$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate_test"
 .\.venv\Scripts\python.exe -m pytest -q
-# -> 101 passed
+# -> 154 passed, 6 skipped
 ```
 
 | 运行条件 | 结果 |
 |---|---|
-| 仅本地单元测试（无 Docker） | `92 passed, 9 skipped` |
-| Docker + PostgreSQL 就绪 | `101 passed` |
+| 仅单元测试（无 Docker、无测试库） | `145 passed, 15 skipped` |
+| 加上专用测试库 | `154 passed, 6 skipped` |
+| 再加上真实上游 Key（容器集成测试） | `160 passed` |
 
-> `tests/test_postgres_integration.py` 会 `drop_all` + `create_all` 重建 `call_records` 表，
-> 因此**不要指向存放重要数据的数据库**。请使用专门用于测试的库。
+> 容器集成测试会向运行中的容器发真实请求，因此要求 `.env` 中配置了
+> 真实 `UPSTREAM_API_KEY`；仍是占位值时这 6 个用例会自动跳过，避免产生无效的付费调用。
+
+### ⚠️ PostgreSQL 集成测试是破坏性的
+
+`tests/test_postgres_integration.py` 会执行 `drop_all` + `create_all`，
+**清空目标库里的 `call_records` 表**。
+
+为防止误删业务数据，`TEST_DATABASE_URL` 受到强制校验（实现见 [tests/db_safety.py](tests/db_safety.py)）：
+
+1. **库名必须以 `_test` 结尾**，否则测试在**导入阶段直接报错**，绝不会执行到 `drop_all`。
+2. 连上数据库后再查一次 `current_database()` 复核库名。
+3. 只接受 PostgreSQL 驱动，并拒绝 `postgres` / `template0` / `template1` 系统库。
+
+因此下面这种写法会被**明确拒绝**（这也正是本次修复掉的历史错误示例）：
+
+```powershell
+# ❌ 错误：这是业务库，会被拒绝
+$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate"
+# UnsafeTestDatabaseError: 拒绝把 'modelgate' 作为测试数据库：
+# 数据库名必须以 '_test' 结尾 ...
+
+# ✅ 正确：专用测试库
+$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate_test"
+```
+
+创建测试库（与业务库 `modelgate` 完全分开）：
+
+```powershell
+docker compose exec db psql -U modelgate -d postgres -c "CREATE DATABASE modelgate_test;"
+```
+
+`tests/test_docker_integration.py` 另有一道防护：若 `TEST_DATABASE_URL` 与容器使用的
+数据库是同一个库，它会直接失败并提示改用独立测试库 ——
+因为容器集成测试会写入记录，而这些数据随后会被上面的 `drop_all` 清空。
 
 ### 只跑某一部分
 
@@ -488,7 +555,9 @@ pytest tests/test_admin_usage.py -v             # 用量统计接口
 ```powershell
 docker compose up -d db
 
-$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate"
+# 必须使用专用测试库（库名以 _test 结尾），否则测试会拒绝运行
+docker compose exec db psql -U modelgate -d postgres -c "CREATE DATABASE modelgate_test;"
+$env:TEST_DATABASE_URL="postgresql+asyncpg://modelgate:modelgate@127.0.0.1:5432/modelgate_test"
 .\.venv\Scripts\python.exe -m pytest tests/test_postgres_integration.py -v
 ```
 
@@ -507,6 +576,12 @@ pip install -r requirements-dev.txt
 
 未运行 Docker 时这 6 个用例会自动跳过，不会让本地 `pytest` 变红。
 
+> **副作用说明（非破坏性）**：`test_persisted_record_is_visible_in_usage` 会向
+> **正在运行的容器**（`:8000`）真实发一次请求，因为 Docker 集成测试的用途就是验证线上部署形态。
+> 该请求会在容器所用的数据库里新增调用记录（每跑一次多约 2 条），
+> 但**不会删除或清空任何数据** —— 与上面 `drop_all` 的 PostgreSQL 集成测试完全不同。
+> 若不想污染业务库，可以先把容器指向 `modelgate_test`，或跑完手工清理这些记录。
+
 ### 测试覆盖范围对照
 
 | 要求 | 对应文件 |
@@ -516,6 +591,8 @@ pip install -r requirements-dev.txt
 | 上游超时与异常处理 | `tests/test_upstream_errors.py` |
 | 并发上限是否生效 | `tests/test_concurrency.py` |
 | Token 和 Decimal 成本计算 | `tests/test_cost.py` |
+| 上游错误脱敏（不泄露密钥） | `tests/test_upstream_secret_leak.py` |
+| 测试库防误删保护 | `tests/test_db_safety.py` |
 | 用量统计接口 | `tests/test_admin_usage.py` |
 | PostgreSQL 调用记录持久化 | `tests/test_persistence.py`（SQLite）+ `tests/test_postgres_integration.py`（真实 PostgreSQL） |
 | 容器集成 | `tests/test_docker_integration.py` |
@@ -537,6 +614,7 @@ modelgate-original/
 │   ├── upstream.py             # httpx 上游客户端（连接池复用）
 │   ├── concurrency.py          # asyncio.Semaphore 并发限制器
 │   ├── cost.py                 # Decimal 成本计算
+│   ├── redaction.py            # 密钥脱敏（上游错误文本落日志前必须过这里）
 │   ├── logging_config.py       # 日志配置
 │   ├── api/
 │   │   └── routes/
@@ -549,9 +627,12 @@ modelgate-original/
 │       └── repository.py       # 数据访问与聚合查询
 ├── tests/
 │   ├── conftest.py                          # fixtures：测试应用、Mock 上游、内存数据库
+│   ├── db_safety.py                         # 测试库防误删守卫（库名必须 _test 结尾）
 │   ├── test_health_and_proxy.py
 │   ├── test_auth.py
 │   ├── test_upstream_errors.py
+│   ├── test_upstream_secret_leak.py         # 上游敏感信息不外泄回归测试
+│   ├── test_db_safety.py                    # 防误删守卫的回归测试
 │   ├── test_concurrency.py
 │   ├── test_cost.py
 │   ├── test_persistence.py

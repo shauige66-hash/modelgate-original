@@ -1,10 +1,8 @@
 """上游 LLM 客户端（OpenAI Chat Completions 兼容）。
 
-要点：
-- 使用单个长生命周期的 httpx.AsyncClient，复用连接池；
-  绝不为每个请求新建客户端（那样会丢失 keep-alive 并快速耗尽端口）。
-- 客户端在应用启动时创建、关闭时释放（见 app/main.py 的 lifespan）。
-- 把 httpx 的各种异常翻译成 GatewayError，路由层只需处理一种异常类型。
+复用单个长生命周期的 httpx.AsyncClient，由 lifespan 创建与释放；
+每请求新建客户端会丢失 keep-alive 并快速耗尽本地端口。
+httpx 的各类异常统一翻译为 GatewayError，路由层只需处理一种异常类型。
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ import httpx
 from app.config import Settings
 from app.errors import ErrorType, GatewayError
 from app.logging_config import get_logger
+from app.redaction import redact_secrets
 
 logger = get_logger(__name__)
 
@@ -32,7 +31,7 @@ class UpstreamResult:
 
     @property
     def prompt_tokens(self) -> int | None:
-        """从 usage 中提取输入 Token；缺失返回 None（未知），而不是 0。"""
+        """输入 Token；usage 缺失时返回 None 表示未知，不按 0 处理。"""
         usage = self.payload.get("usage")
         if not isinstance(usage, dict):
             return None
@@ -40,7 +39,7 @@ class UpstreamResult:
 
     @property
     def completion_tokens(self) -> int | None:
-        """从 usage 中提取输出 Token；缺失返回 None（未知），而不是 0。"""
+        """输出 Token；usage 缺失时返回 None 表示未知，不按 0 处理。"""
         usage = self.payload.get("usage")
         if not isinstance(usage, dict):
             return None
@@ -48,7 +47,7 @@ class UpstreamResult:
 
 
 def _as_optional_int(value: Any) -> int | None:
-    """把上游返回值安全地转成 int；无法解析时返回 None。"""
+    """安全转 int；无法解析时返回 None。"""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -60,10 +59,8 @@ def _as_optional_int(value: Any) -> int | None:
 def create_http_client(settings: Settings) -> httpx.AsyncClient:
     """创建共享的异步 HTTP 客户端。
 
-    timeout 拆成三段，便于区分「连不上」和「连上了但算得慢」：
-    - connect：建立 TCP/TLS 连接
-    - read：等待上游返回（LLM 推理耗时主要在这里，因此设置较长）
-    - write / pool：发送与等待空闲连接
+    read 超时取完整配置值（LLM 推理耗时集中在这里），
+    connect/write 限制为最多 10s，便于区分「连不上」与「算得慢」。
     """
     timeout = httpx.Timeout(
         settings.upstream_timeout_seconds,
@@ -85,7 +82,6 @@ def create_http_client(settings: Settings) -> httpx.AsyncClient:
         headers={
             "Authorization": f"Bearer {settings.upstream_api_key_value}",
             "Content-Type": "application/json",
-            # 便于在日志中标识流量来源
             "User-Agent": f"ModelGate/{settings.app_version}",
         },
     )
@@ -99,8 +95,8 @@ class ChatCompletionsClient:
         self._settings = settings
 
         if not settings.is_upstream_configured:
-            # 只警告不抛错：服务仍可启动，调用时返回明确错误，
-            # 这样健康检查和管理接口在未配置密钥时依然可用。
+            # 只警告不抛错：服务仍能启动，健康检查与管理接口保持可用，
+            # 未配置密钥的错误在真正调用时返回。
             logger.warning(
                 "UPSTREAM_API_KEY 未配置，/v1/chat/completions 将返回错误"
             )
@@ -120,7 +116,7 @@ class ChatCompletionsClient:
         try:
             response = await self._client.post(_CHAT_COMPLETIONS_PATH, json=payload)
         except httpx.TimeoutException as exc:
-            # 连上但超时、或连接阶段超时，都归为上游超时
+            # 连接阶段与读取阶段超时都归入上游超时
             logger.warning("上游超时 | %s", type(exc).__name__)
             raise GatewayError(
                 f"上游请求超时（{self._settings.upstream_timeout_seconds:g}s）",
@@ -128,15 +124,19 @@ class ChatCompletionsClient:
                 status_code=504,
             ) from exc
         except httpx.ConnectError as exc:
-            logger.warning("无法连接上游 | %s", exc)
+            # httpx 的连接错误文本可能带完整 URL，先脱敏再落日志
+            logger.warning("无法连接上游 | %s", redact_secrets(str(exc)))
             raise GatewayError(
                 "无法连接上游模型服务",
                 error_type=ErrorType.UPSTREAM_CONNECT_ERROR,
                 status_code=502,
             ) from exc
         except httpx.HTTPError as exc:
-            # 兜底：其他 httpx 传输层异常
-            logger.warning("上游传输层错误 | %s | %s", type(exc).__name__, exc)
+            logger.warning(
+                "上游传输层错误 | %s | %s",
+                type(exc).__name__,
+                redact_secrets(str(exc)),
+            )
             raise GatewayError(
                 "上游请求失败",
                 error_type=ErrorType.UPSTREAM_CONNECT_ERROR,
@@ -146,15 +146,17 @@ class ChatCompletionsClient:
         return self._parse_response(response)
 
     def _parse_response(self, response: httpx.Response) -> UpstreamResult:
-        """校验并解析上游响应。"""
+        """校验上游响应，失败时抛出 GatewayError。"""
         if response.status_code >= 400:
             error_type = (
                 ErrorType.UPSTREAM_AUTH_ERROR
                 if response.status_code in (401, 403)
                 else ErrorType.UPSTREAM_HTTP_ERROR
             )
-            # 只截取少量上游信息用于排查，避免把上游返回的大段内容写进日志
-            detail = _safe_upstream_detail(response)
+            # 上游错误文本可能回显收到的 API Key 片段（如 DeepSeek 的
+            # "Your api key: ****xxxx is invalid"），因此只脱敏后写日志，
+            # 返回给客户端的是固定描述，不拼接任何上游原文。
+            detail = redact_secrets(_extract_upstream_detail(response))
             logger.warning(
                 "上游返回错误 | status=%s type=%s detail=%s",
                 response.status_code,
@@ -162,9 +164,9 @@ class ChatCompletionsClient:
                 detail,
             )
             raise GatewayError(
-                f"上游模型服务返回 {response.status_code}: {detail}",
+                f"上游模型服务返回 {response.status_code}",
                 error_type=error_type,
-                # 429 / 5xx 属于上游临时故障，用 502 告知客户端「是网关的上游出问题」
+                # 上游 4xx/5xx 对客户端统一呈现为 502：问题出在网关的上游
                 status_code=502,
             )
 
@@ -189,8 +191,11 @@ class ChatCompletionsClient:
         return UpstreamResult(status_code=response.status_code, payload=payload)
 
 
-def _safe_upstream_detail(response: httpx.Response, *, limit: int = 200) -> str:
-    """提取上游错误信息，限制长度并去掉换行。"""
+def _extract_upstream_detail(response: httpx.Response, *, limit: int = 200) -> str:
+    """提取上游错误信息，仅用于服务端日志。
+
+    调用方需再用 redact_secrets() 脱敏，且不得把结果返回给客户端。
+    """
     try:
         body = response.json()
         if isinstance(body, dict):

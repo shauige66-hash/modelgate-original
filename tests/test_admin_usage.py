@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import httpx
 
+from app.db.repository import CallRecordRepository, NewCallRecord
 from app.errors import ErrorType
 
 ADMIN_URL = "/admin/usage"
@@ -97,6 +98,172 @@ class TestUsageEndpointBasics:
         assert body["totals"]["total_tokens"] == 0
         assert body["data_quality"]["records_with_unknown_tokens"] == 1
         assert body["data_quality"]["records_without_cost"] == 1
+
+
+class TestModelFilterIsConsistent:
+    """model 筛选必须同时作用于 totals / by_model / errors。
+
+    修复前：只有 totals 被筛选，by_model 与 errors 返回的是全量数据，
+    导致同一份响应里三组数字口径不一致。
+
+    注意：不能用 HTTP 层造数据 —— 上游 mock 固定返回 model=deepseek-chat，
+    请求里指定的 model 会被上游返回值覆盖。因此这里直接写仓储层，
+    精确控制每条记录的 model 与 error_type。
+    """
+
+    async def _seed_multi_model(self, harness) -> None:
+        """写入两个模型的数据，各自带成功与失败记录。
+
+        deepseek-chat     : 2 条（1 成功 1 失败，timeout）
+        deepseek-reasoner : 3 条（2 成功 1 失败，http_error）
+        """
+        from decimal import Decimal
+
+        async with harness.session_factory() as session:
+            repository = CallRecordRepository(session)
+
+            def record(
+                request_id: str,
+                model: str,
+                *,
+                ok: bool,
+                error_type: str = "none",
+                prompt_tokens: int | None = 10,
+            ) -> NewCallRecord:
+                return NewCallRecord(
+                    request_id=request_id,
+                    model=model,
+                    latency_ms=100,
+                    http_status=200 if ok else 502,
+                    error_type=error_type,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=5 if prompt_tokens is not None else None,
+                    estimated_cost_usd=(
+                        Decimal("0.000010") if prompt_tokens is not None else None
+                    ),
+                    message_count=1,
+                    prompt_chars=10,
+                )
+
+            await repository.insert(
+                record("req_chat_ok", "deepseek-chat", ok=True)
+            )
+            await repository.insert(
+                record(
+                    "req_chat_fail",
+                    "deepseek-chat",
+                    ok=False,
+                    error_type="upstream_timeout",
+                )
+            )
+            await repository.insert(
+                record("req_reason_ok1", "deepseek-reasoner", ok=True)
+            )
+            await repository.insert(
+                record("req_reason_ok2", "deepseek-reasoner", ok=True)
+            )
+            await repository.insert(
+                record(
+                    "req_reason_fail",
+                    "deepseek-reasoner",
+                    ok=False,
+                    error_type="upstream_http_error",
+                )
+            )
+            await session.commit()
+
+    async def test_filter_narrows_totals(self, harness) -> None:
+        await self._seed_multi_model(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?model=deepseek-chat", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        assert body["totals"]["total_requests"] == 2
+        assert body["totals"]["success_count"] == 1
+        assert body["totals"]["failure_count"] == 1
+        assert body["range"]["model_filter"] == "deepseek-chat"
+
+    async def test_filter_narrows_by_model(self, harness) -> None:
+        """by_model 必须只包含被筛选的模型（修复前会返回全部模型）。"""
+        await self._seed_multi_model(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?model=deepseek-chat", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        assert len(body["by_model"]) == 1
+        assert body["by_model"][0]["model"] == "deepseek-chat"
+        assert body["by_model"][0]["total_requests"] == 2
+        # 不允许出现另一个模型
+        assert all(item["model"] != "deepseek-reasoner" for item in body["by_model"])
+
+    async def test_filter_narrows_errors(self, harness) -> None:
+        """errors 必须只包含被筛选模型的错误（修复前会混入其他模型的错误）。"""
+        await self._seed_multi_model(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?model=deepseek-chat", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        error_types = {item["error_type"] for item in body["errors"]}
+        assert error_types == {"upstream_timeout"}
+        assert "upstream_http_error" not in error_types
+
+    async def test_all_three_sections_agree(self, harness) -> None:
+        """三处口径必须一致：totals 的失败数 = errors 总数 = by_model 失败数。"""
+        await self._seed_multi_model(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?model=deepseek-reasoner", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        errors_total = sum(item["count"] for item in body["errors"])
+        by_model = body["by_model"]
+
+        assert len(by_model) == 1
+        assert body["totals"]["total_requests"] == 3
+        assert body["totals"]["failure_count"] == 1
+        assert errors_total == body["totals"]["failure_count"]
+        assert by_model[0]["total_requests"] == body["totals"]["total_requests"]
+        assert by_model[0]["failure_count"] == body["totals"]["failure_count"]
+
+    async def test_unfiltered_request_returns_all_models(self, harness) -> None:
+        """不加筛选时，by_model 应包含全部模型，errors 汇总全部错误。"""
+        await self._seed_multi_model(harness)
+
+        body = (await harness.client.get(ADMIN_URL, headers=ADMIN_HEADERS)).json()
+
+        models = {item["model"] for item in body["by_model"]}
+        assert models == {"deepseek-chat", "deepseek-reasoner"}
+        assert body["totals"]["total_requests"] == 5
+
+        error_types = {item["error_type"] for item in body["errors"]}
+        assert error_types == {"upstream_timeout", "upstream_http_error"}
+
+    async def test_filter_matching_nothing_returns_empty_sections(
+        self, harness
+    ) -> None:
+        """筛选一个不存在的模型：三处都应清空，而不是回落到全量。"""
+        await self._seed_multi_model(harness)
+
+        body = (
+            await harness.client.get(
+                f"{ADMIN_URL}?model=no-such-model", headers=ADMIN_HEADERS
+            )
+        ).json()
+
+        assert body["totals"]["total_requests"] == 0
+        assert body["by_model"] == []
+        assert body["errors"] == []
 
 
 class TestUsageEndpointGrouping:

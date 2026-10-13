@@ -1,7 +1,6 @@
-"""Chat Completions 的请求 / 响应数据模型。
+"""Chat Completions 的请求与响应模型。
 
-只实现非流式（stream=false）场景。显式拒绝 stream=true，
-避免出现「看似支持流式、实际返回整包」的误导行为。
+只支持非流式；stream=true 会被显式拒绝，避免「声称支持流式但返回整包」的误导。
 """
 
 from __future__ import annotations
@@ -21,7 +20,10 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """客户端请求体，字段与 OpenAI Chat Completions 保持兼容。"""
+    """客户端请求体，字段与 OpenAI Chat Completions 兼容。
+
+    extra="allow" 保留 temperature、max_tokens 等附加参数并原样转发。
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -35,17 +37,12 @@ class ChatCompletionRequest(BaseModel):
     @field_validator("stream")
     @classmethod
     def _reject_stream(cls, value: bool) -> bool:
-        """本阶段只支持非流式请求。"""
         if value:
             raise ValueError("暂不支持 stream=true，请使用非流式请求")
         return value
 
     def upstream_payload(self, *, default_model: str) -> dict[str, Any]:
-        """构造转发给上游的请求体。
-
-        显式带上 stream=False，并保留客户端传入的其他兼容参数
-        （如 temperature、max_tokens 等，由 extra="allow" 收集）。
-        """
+        """构造转发给上游的请求体，显式带上 stream=False。"""
         payload = self.model_dump(exclude_none=True)
         payload["model"] = self.model or default_model
         payload["stream"] = False
@@ -53,7 +50,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 class Usage(BaseModel):
-    """上游返回的 Token 用量。字段缺失时为 None，代表未知。"""
+    """上游返回的 Token 用量；字段缺失为 None，代表未知。"""
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -63,8 +60,7 @@ class Usage(BaseModel):
 class ChatCompletionResponse(BaseModel):
     """透传给客户端的响应。
 
-    使用 extra="allow"，保留上游返回的全部字段（id、choices、finish_reason 等），
-    只把 usage 提升为强类型对象以便计费。
+    保留上游返回的全部字段，只把 usage 提升为强类型以便计费。
     """
 
     model_config = ConfigDict(extra="allow")

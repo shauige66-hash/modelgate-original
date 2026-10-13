@@ -1,8 +1,7 @@
 """错误分类与统一异常响应。
 
-设计目标：
-1. 每一次调用都能落库一个结构化错误类型，便于统计失败原因。
-2. 对客户端返回稳定、不含内部细节的错误体。
+每次调用都会落库一个结构化的 error_type，便于统计失败原因；
+返回给客户端的内容保持稳定且不含内部细节。
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ class GatewayError(Exception):
 async def gateway_error_handler(_: Request, exc: GatewayError) -> JSONResponse:
     """把 GatewayError 转成 OpenAI 风格的错误响应体。
 
-    失败响应同样带上 X-Request-Id，让客户端可以拿它去对账数据库记录。
+    失败响应同样带 X-Request-Id，便于客户端与数据库记录对账。
     """
     logger.warning(
         "网关错误 | type=%s status=%s detail=%s",

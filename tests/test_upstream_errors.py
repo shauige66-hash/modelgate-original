@@ -1,7 +1,7 @@
-"""上游异常与超时处理测试。
+"""上游异常处理测试。
 
-Mock 上游返回各种失败：超时、连接错误、401、429、500、非 JSON、缺少 choices。
-重点验证：每种失败都被翻译成明确的 HTTP 状态码 + 可落库的 error_type。
+覆盖超时、连接错误、401/429/500、非 JSON 与缺少 choices，
+确认每种失败都被翻译成明确的 HTTP 状态码与可落库的 error_type。
 """
 
 from __future__ import annotations

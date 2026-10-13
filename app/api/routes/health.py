@@ -1,7 +1,7 @@
-"""健康检查路由。
+"""健康检查。
 
-/health       : 存活探针，不依赖任何外部组件，供 Docker healthcheck 使用。
-/health/ready : 就绪探针，额外检查数据库连通性、上游密钥与并发水位。
+/health 是存活探针，不依赖外部组件，供 Docker healthcheck 使用。
+/health/ready 额外检查数据库连通性，并报告上游配置与并发水位。
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health", summary="存活探针")
 async def health() -> dict[str, str]:
-    """返回固定的 ok，用于容器存活检查。"""
     return {"status": "ok"}
 
 
@@ -35,8 +34,8 @@ async def readiness(
 ) -> dict[str, object]:
     """检查依赖项是否就绪。
 
-    数据库不可用时返回 503，便于编排系统在数据库就绪前不转发流量。
-    上游密钥未配置不算致命错误（服务本身仍可响应），只在结果中标记出来。
+    数据库不可用时返回 503，便于编排系统在数据库就绪前不转发流量；
+    上游密钥未配置不算致命（服务本身可响应），只在结果中标记。
     """
     database_ok = True
     database_error: str | None = None
@@ -44,7 +43,7 @@ async def readiness(
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001 - 探针需要捕获一切失败并降级
+    except Exception as exc:  # noqa: BLE001 - 探针捕获一切失败并降级
         database_ok = False
         database_error = type(exc).__name__
         logger.warning("就绪探针：数据库不可用 | %s", exc)

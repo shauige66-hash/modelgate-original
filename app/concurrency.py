@@ -1,15 +1,10 @@
-"""单进程并发控制。
+"""单进程并发限制。
 
-用 asyncio.Semaphore 限制同时进行的上游请求数。
+用 asyncio.Semaphore 限制同时进行的上游请求数，避免单个实例耗尽本地连接池
+或把上游打爆。等待槽位有上限，超时抛 ConcurrencyTimeout，由路由层转成 503。
 
-必要的说明（避免夸大能力）：
-- 它只在「当前进程」内生效。多副本 / 多容器部署时，
-  每个副本各自持有一份配额，因此它**不是**分布式限流，也不是生产级高并发方案。
-- 它的作用是保护上游与自身资源，防止单个实例把上游打爆或本地连接池耗尽。
-
-超时语义：
-- 等待槽位有上限（CONCURRENCY_ACQUIRE_TIMEOUT_SECONDS）。
-- 超时抛 ConcurrencyTimeout，由调用方翻译成 HTTP 503。
+注意：信号量只在当前进程内生效。多副本部署时每个副本各有一份配额，
+实际总并发是「副本数 × limit」，因此它不是分布式限流。
 """
 
 from __future__ import annotations
@@ -33,7 +28,7 @@ class ConcurrencyLimiter:
     用法::
 
         async with limiter.slot():
-            ...  # 这里的上游请求受并发上限保护
+            ...  # 受并发上限保护的上游请求
     """
 
     def __init__(self, limit: int, acquire_timeout: float) -> None:
@@ -46,42 +41,38 @@ class ConcurrencyLimiter:
         self._acquire_timeout = acquire_timeout
         self._semaphore = asyncio.Semaphore(limit)
 
-        # 仅用于可观测性，不参与限流决策
+        # 仅用于观测，不参与限流决策
         self._in_flight = 0
         self._peak_in_flight = 0
 
     @property
     def limit(self) -> int:
-        """并发上限。"""
         return self._limit
 
     @property
     def available(self) -> int:
-        """当前可用槽位数量（近似值，仅供监控展示）。"""
-        return self._semaphore._value  # noqa: SLF001 - 只读观测，无副作用
+        """当前可用槽位数（近似值，仅供监控展示）。"""
+        return self._semaphore._value  # noqa: SLF001 - 只读观测
 
     @property
     def in_flight(self) -> int:
-        """当前正在执行的请求数。"""
         return self._in_flight
 
     @property
     def peak_in_flight(self) -> int:
-        """历史峰值并发数，用于验证限流是否真的生效。"""
+        """历史峰值，用于确认限流确实生效。"""
         return self._peak_in_flight
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
-        """获取一个并发槽位。
+        """占用一个槽位，退出时释放。
 
-        在 finally 中释放信号量，因此：
-        - 业务代码抛异常会释放
-        - 客户端取消（asyncio.CancelledError）也会释放
-        不会因为异常路径导致信号量泄漏和后续死锁。
+        释放放在 finally，因此业务异常与客户端取消（CancelledError）
+        都会归还槽位，不会因异常路径导致信号量泄漏。
+
+        wait_for 超时会取消内部的 acquire()，此时信号量未被占用，无需补偿。
         """
         try:
-            # wait_for 在超时后会取消内部的 acquire()，
-            # 此时信号量不会被占用，无需额外补偿。
             await asyncio.wait_for(
                 self._semaphore.acquire(),
                 timeout=self._acquire_timeout,

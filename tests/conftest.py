@@ -1,14 +1,14 @@
 """pytest 共享 fixtures。
 
-关键约定：
-- 测试**不依赖**真实付费模型 API。上游服务由 httpx.MockTransport 模拟。
-- 测试默认用内存 SQLite；设置了 TEST_DATABASE_URL 时改用真实 PostgreSQL。
-- 每个用例得到全新的表结构，避免用例之间互相污染。
+约定：
+- 不依赖真实付费模型 API，上游由 httpx.MockTransport 模拟。
+- 默认使用内存 SQLite；设置 TEST_DATABASE_URL 后改用真实 PostgreSQL。
+- 每个用例拿到全新的表结构，避免用例之间互相污染。
+- PostgreSQL 集成测试会 drop_all + create_all，TEST_DATABASE_URL 必须指向
+  库名以 `_test` 结尾的专用测试库，否则导入阶段即报错（见 tests/db_safety.py）。
 
-两套上游 Mock 的分工：
-- `app` / `client`：上游行为固定为「返回成功响应」，用于大多数正向用例。
-- `make_harness`：可自定义上游行为与配置，用于失败路径与并发用例。
-两者共用同一个 `upstream_requests` 记录列表，不会出现两套互不相通的记录。
+上游 Mock 有两套：`app`/`client` 固定返回成功响应，
+`make_harness` 可自定义上游行为与配置；两者共用同一个 upstream_requests 记录列表。
 """
 
 from __future__ import annotations
@@ -29,15 +29,29 @@ from app.db.models import Base
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.upstream import ChatCompletionsClient
-
-# ---------------------------------------------------------------- 常量
+from tests.db_safety import (
+    UnsafeTestDatabaseError,
+    assert_connected_database_is_test,
+    assert_safe_test_database_url,
+)
 
 CLIENT_KEY = "sk-client-test-key"
 ADMIN_KEY = "sk-admin-test-key"
 UPSTREAM_KEY = "sk-upstream-test-key"
 
-# 真实 PostgreSQL 集成测试用；未设置则跳过相关用例
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")
+
+# 在导入阶段校验目标库名：配置错误时用例还没开始跑就报错，
+# 不会执行到 drop_all。
+if TEST_DATABASE_URL:
+    try:
+        TEST_DATABASE_NAME = assert_safe_test_database_url(TEST_DATABASE_URL)
+    except UnsafeTestDatabaseError as exc:
+        raise UnsafeTestDatabaseError(
+            f"\n\n[ModelGate 测试安全保护] 已拒绝启动 PostgreSQL 集成测试。\n{exc}\n"
+        ) from exc
+else:
+    TEST_DATABASE_NAME = ""
 
 # ---------------------------------------------------------------- 上游响应样本
 
@@ -79,9 +93,9 @@ SAMPLE_COMPLETION_WITHOUT_USAGE: dict[str, Any] = {
 # ---------------------------------------------------------------- 配置
 
 def build_settings(**overrides: Any) -> Settings:
-    """构造测试用配置。
+    """构造测试配置。
 
-    显式传入 _env_file=None，避免测试机器上的 .env 影响结果。
+    传入 _env_file=None，避免测试机器上的 .env 影响结果。
     """
     values: dict[str, Any] = {
         "upstream_base_url": "https://upstream.test",
@@ -104,7 +118,7 @@ def build_settings(**overrides: Any) -> Settings:
 
 
 async def _prepare_database(engine: AsyncEngine) -> None:
-    """先删后建，保证每个用例从空表开始。"""
+    """删表重建，让每个用例从空表开始。"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
@@ -113,8 +127,8 @@ async def _prepare_database(engine: AsyncEngine) -> None:
 def _make_shared_memory_engine() -> AsyncEngine:
     """构造共享连接的内存 SQLite 引擎。
 
-    必须用 StaticPool：内存 SQLite 在连接关闭后数据即丢失，
-    所有会话需要共用同一个连接，否则每个连接会看到一个独立的空库。
+    必须用 StaticPool：内存 SQLite 的数据随连接关闭而消失，
+    所有会话需要共用同一个连接，否则各自看到一个独立的空库。
     """
     from sqlalchemy.ext.asyncio import create_async_engine
     from sqlalchemy.pool import StaticPool
@@ -140,11 +154,36 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 @pytest_asyncio.fixture
 async def pg_engine() -> AsyncIterator[AsyncEngine]:
-    """真实 PostgreSQL 引擎；未配置 TEST_DATABASE_URL 时跳过。"""
+    """真实 PostgreSQL 引擎；未配置 TEST_DATABASE_URL 时跳过。
+
+    drop_all/create_all 之前有两道保护：导入阶段已校验连接串中的库名以 `_test`
+    结尾，这里再用 current_database() 确认实际连到的库。
+    """
     if not TEST_DATABASE_URL:
         pytest.skip("未设置 TEST_DATABASE_URL，跳过 PostgreSQL 集成测试")
 
+    # 再校验一次，防止该变量在运行期被改写
+    database_name = assert_safe_test_database_url(TEST_DATABASE_URL)
+
     engine = create_engine(build_settings(database_url=TEST_DATABASE_URL))
+
+    try:
+        actual_name = await assert_connected_database_is_test(engine)
+    except Exception:
+        await engine.dispose()
+        raise
+
+    assert actual_name == database_name, (
+        f"连接串声明的库是 {database_name!r}，实际连到 {actual_name!r}，已中止测试。"
+    )
+
+    # 把破坏性操作写进输出，便于在 CI 日志中审计
+    print(
+        f"\n[ModelGate 测试安全保护] 即将重建 PostgreSQL 数据库 "
+        f"{actual_name!r} 的全部表（drop_all + create_all）。"
+        f"\n                         该库以 '_test' 结尾，已确认是专用测试库。"
+    )
+
     await _prepare_database(engine)
     try:
         yield engine
@@ -173,10 +212,7 @@ async def db_session(
 
 @pytest.fixture
 def upstream_requests() -> list[httpx.Request]:
-    """记录发往上游的请求，便于断言转发内容。
-
-    作用域是 function：每个用例都拿到一个干净列表。
-    """
+    """记录发往上游的请求，供断言转发内容。每个用例拿到独立列表。"""
     return []
 
 
@@ -188,8 +224,8 @@ def _make_mock_upstream_client(
 ) -> httpx.AsyncClient:
     """构造带 MockTransport 的上游客户端。
 
-    带上与生产一致的 Authorization 头，
-    这样「是否用了配置的上游密钥」才是一个有意义的断言。
+    带上与生产一致的 Authorization 头，这样「是否使用了配置的上游密钥」
+    才是一个有意义的断言。
     """
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -210,10 +246,7 @@ def _make_mock_upstream_client(
 
 
 class TestHarness:
-    """把「测试应用 + Mock 上游 + 数据库 + 客户端」打包在一起。
-
-    用例只需面对一个对象，不用手工管理多份需要关闭的资源。
-    """
+    """把测试应用、Mock 上游、数据库与客户端打包在一起，便于统一关闭。"""
 
     def __init__(
         self,
@@ -240,7 +273,6 @@ class TestHarness:
         return self.app.state.session_factory
 
     async def aclose(self) -> None:
-        """释放全部资源。"""
         await self.client.aclose()
         await self.upstream_http_client.aclose()
         await self.engine.dispose()
@@ -254,8 +286,8 @@ def _build_test_app(
 ) -> Any:
     """构造已注入测试依赖的 app，不运行 lifespan。
 
-    lifespan 会连接真实数据库并创建真实的 HTTP 客户端，
-    测试里改用内存 SQLite 与 MockTransport，因此手动组装 app.state。
+    lifespan 会连接真实数据库、创建真实 HTTP 客户端，
+    测试改用内存 SQLite 与 MockTransport，因此手动组装 app.state。
     """
     app = create_app(settings)
     app.state.settings = settings
@@ -274,13 +306,13 @@ def _build_test_app(
 async def make_harness(
     upstream_requests: list[httpx.Request],
 ) -> AsyncIterator[Callable[..., Awaitable[TestHarness]]]:
-    """按需构造测试夹具，支持自定义上游行为与配置。
+    """按需构造测试夹具，可自定义上游行为与配置。
 
     用法::
 
-        h = await make_harness(handler)                    # 自定义上游响应
-        h = await make_harness(settings=my_settings)       # 自定义配置
-        h = await make_harness(authenticated=False)        # 不带客户端密钥
+        h = await make_harness(handler)               # 自定义上游响应
+        h = await make_harness(settings=my_settings)  # 自定义配置
+        h = await make_harness(authenticated=False)   # 不带客户端凭据
     """
     created: list[TestHarness] = []
 
@@ -305,8 +337,7 @@ async def make_harness(
             engine=engine,
         )
 
-        # 默认带上合法客户端密钥，让用例专注于被测行为本身。
-        # authenticated=False 时不带任何凭据，用于测试鉴权拒绝路径。
+        # 默认带合法客户端密钥；authenticated=False 时不带凭据，用于鉴权拒绝路径
         default_headers = (
             {"Authorization": f"Bearer {CLIENT_KEY}"} if authenticated else {}
         )
@@ -362,10 +393,10 @@ async def app(engine: AsyncEngine, upstream_requests: list[httpx.Request]) -> An
 
 @pytest_asyncio.fixture
 async def client(app: Any) -> AsyncIterator[httpx.AsyncClient]:
-    """直接调用 ASGI 应用的异步客户端（不经过网络）。
+    """直接调用 ASGI 应用的异步客户端。
 
-    刻意**不**带默认鉴权头：让每个用例显式声明自己用的凭据，
-    这样「缺少凭据返回 401」这类用例才不会被夹具悄悄放行。
+    刻意不带默认鉴权头：由用例显式声明凭据，
+    否则「缺少凭据返回 401」这类用例会被夹具悄悄放行。
     """
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(

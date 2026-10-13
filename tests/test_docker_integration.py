@@ -1,22 +1,19 @@
 """Docker 容器集成测试。
 
-默认跳过：本机没有可用的 Docker daemon 时自动跳过，
-因此没有安装 Docker 的机器上 `pytest` 依然全绿。
+没有可用的 Docker daemon 时整体跳过，所以在未装 Docker 的机器上 `pytest` 依然全绿。
 
-跑法：
-    1) 确保 Docker Desktop 已启动（docker info 可用）
-    2) docker compose up -d --build
-    3) pytest tests/test_docker_integration.py -v
+跑法：启动 Docker Desktop 后执行 `docker compose up -d --build`，
+再运行 `pytest tests/test_docker_integration.py -v`。
 
-这些用例验证的是「真实容器里的端到端行为」：
-容器是否起来、健康检查是否通过、数据库是否真的连上、
-以及一次完整调用是否能在真实 PostgreSQL 中落库。
+这组用例向运行中的容器发真实 HTTP 请求，覆盖健康检查、
+容器内数据库连通性，以及一次调用能否落库。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import time
@@ -25,13 +22,30 @@ import urllib.request
 
 import pytest
 
+from tests.conftest import TEST_DATABASE_URL
+
 # 允许覆盖，便于指向非默认端口
 BASE_URL = os.getenv("MODELGATE_BASE_URL", "http://127.0.0.1:8000")
 CLIENT_KEY = os.getenv("MODELGATE_CLIENT_KEY", "sk-client-local-dev-key")
 ADMIN_KEY = os.getenv("MODELGATE_ADMIN_KEY", "sk-admin-local-dev-key")
 
-# 等待容器就绪的最长时间
 STARTUP_TIMEOUT_SECONDS = int(os.getenv("MODELGATE_STARTUP_TIMEOUT", "180"))
+
+# 容器的 DATABASE_URL 默认值（docker-compose.yml 中通过服务名 db 访问）
+DEFAULT_DATABASE_URL = "postgresql+asyncpg://modelgate:modelgate@db:5432/modelgate"
+
+# .env.example 中的上游 Key 占位值
+_PLACEHOLDER_UPSTREAM_KEYS = frozenset({"sk-replace-with-your-real-key"})
+
+
+def _database_name(database_url: str) -> str:
+    """取出连接串里的库名，用于判断两个连接串是否指向同一个库。"""
+    from sqlalchemy.engine import make_url
+
+    try:
+        return make_url(database_url).database or ""
+    except Exception:  # noqa: BLE001 - 无法解析时按「未知」处理
+        return ""
 
 
 def _docker_available() -> bool:
@@ -84,9 +98,35 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _skip_when_upstream_key_is_placeholder() -> None:
+    """上游 Key 仍是占位值时跳过所有用例。
+
+    这些用例需要正在运行的容器，而容器读取的是项目根目录的 .env。
+    如果那里还是 .env.example 的占位值，每次运行都会真的打一次 DeepSeek
+    （用无效 Key，必然 401）。我们没有真实 Key 可用，所以直接跳过，
+    避免产生无意义的外部调用。
+    """
+    env_file = pathlib.Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.exists():
+        pytest.skip("未找到 .env，无法确认容器已配置真实上游 Key")
+
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("UPSTREAM_API_KEY="):
+            value = stripped.split("=", 1)[1].strip()
+            if value in _PLACEHOLDER_UPSTREAM_KEYS or not value:
+                pytest.skip(
+                    f"上游 Key 仍是占位值（{value!r}），跳过以免产生无效的外部 API 调用"
+                )
+            return
+
+    pytest.skip("未在 .env 中找到 UPSTREAM_API_KEY")
+
+
 @pytest.fixture(scope="module")
 def live_api() -> str:
-    """确保 API 正在运行；未运行时给出明确的失败提示。"""
+    """等待 API 就绪；超时给出可操作的提示。"""
     deadline = time.time() + STARTUP_TIMEOUT_SECONDS
     last_error = ""
 
@@ -103,6 +143,30 @@ def live_api() -> str:
         f"{STARTUP_TIMEOUT_SECONDS}s 内 {BASE_URL}/health 未就绪。"
         f"请先执行 `docker compose up -d --build`。最后错误：{last_error}"
     )
+
+
+@pytest.fixture(autouse=True)
+def _refuse_to_write_into_the_test_database(live_api: str) -> None:
+    """禁止「容器业务库」与「集成测试库」是同一个库。
+
+    本文件会向运行中的容器发真实请求，因此会在容器所用数据库里写入记录。
+    test_postgres_integration.py 则会对 TEST_DATABASE_URL 指向的库做
+    drop_all + create_all。若两者指向同一个库，这里写入的业务数据
+    会被后续的破坏性测试清空 —— 因此提前拦住。
+    """
+    if not TEST_DATABASE_URL:
+        return
+
+    service_db = _database_name(TEST_DATABASE_URL)
+    container_db = _database_name(os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL))
+
+    if service_db and service_db == container_db:
+        pytest.fail(
+            f"TEST_DATABASE_URL 与容器的 DATABASE_URL 指向同一个库 "
+            f"({service_db!r})。该库会被 PostgreSQL 集成测试 drop_all 清空，"
+            f"请为测试使用独立数据库（库名以 _test 结尾），"
+            f"例如把 TEST_DATABASE_URL 指向 modelgate_test。"
+        )
 
 
 class TestContainerHealth:

@@ -1,10 +1,7 @@
 """Token 成本估算。
 
-关键约定：
-1. 全程使用 decimal.Decimal，不用 float，避免金额累加误差。
-2. 单价单位统一为「美元 / 百万 Token」，在配置与代码中显式标注。
-3. 上游未返回 usage 时，Token 记为 None（未知），
-   绝不能当成 0，否则统计会静默偏低。
+金额全程使用 decimal.Decimal，避免浮点累加误差；单价单位为美元 / 百万 Token。
+上游未返回 usage 时 Token 记为 None（未知），不按 0 处理，否则统计会静默偏低。
 """
 
 from __future__ import annotations
@@ -13,13 +10,13 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from app.config import MILLION, Settings
 
-# 金额保留 6 位小数：单次调用成本通常远小于 1 美分，
-# 保留更多位可以减少大量小请求累加时的截断误差。
+# 保留 6 位小数：单次调用成本通常远小于 1 美分，
+# 位数太少会让大量小请求累加时产生可见截断误差。
 _COST_QUANTUM = Decimal("0.000001")
 
 
 def quantize_cost(value: Decimal) -> Decimal:
-    """把金额规范化到固定小数位，便于入库与展示。"""
+    """规范化金额的小数位。"""
     return value.quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP)
 
 
@@ -30,12 +27,9 @@ def calculate_cost(
     input_price_per_million: Decimal,
     output_price_per_million: Decimal,
 ) -> Decimal | None:
-    """估算单次调用费用，单位：美元。
+    """估算单次调用费用（美元），价格为美元 / 百万 Token。
 
-    返回 None 表示「无法估算」——即输入与输出 Token 都未知。
-    只要有一侧 Token 已知，就按已知部分估算，未知部分不参与计算。
-
-    参数中的价格单位为 美元 / 百万 Token。
+    两侧 Token 都未知时返回 None；只有一侧已知时仅按已知部分估算。
     """
     if prompt_tokens is None and completion_tokens is None:
         return None
@@ -57,10 +51,9 @@ def estimate_cost_for_settings(
     prompt_tokens: int | None,
     completion_tokens: int | None,
 ) -> Decimal | None:
-    """使用当前配置的单价估算成本。
+    """按当前配置单价估算成本。
 
-    说明：本项目只有一套全局单价，属于简化实现。
-    真实多模型场景应按模型维护价格表（见 README「未来改进方向」）。
+    仅有一套全局单价，未按模型区分，属简化实现；多模型场景需要价格表。
     """
     return calculate_cost(
         prompt_tokens=prompt_tokens,
