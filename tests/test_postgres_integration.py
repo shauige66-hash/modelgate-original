@@ -24,7 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.db.models import CallRecord
-from app.db.repository import CallRecordRepository, NewCallRecord
+from app.db.repository import CallRecordRepository, NewCallRecord, UsageFilter
 from app.errors import ErrorType
 from tests.conftest import TEST_DATABASE_URL, build_settings
 
@@ -188,11 +188,11 @@ class TestAggregationOnPostgres:
             await session.commit()
 
             since = datetime.now(timezone.utc) - timedelta(hours=1)
-            totals = await repository.usage_totals(since=since)
+            totals = await repository.usage_totals(UsageFilter(since=since))
             assert totals.total_requests == 1
 
             future = datetime.now(timezone.utc) + timedelta(hours=1)
-            totals_future = await repository.usage_totals(since=future)
+            totals_future = await repository.usage_totals(UsageFilter(since=future))
             assert totals_future.total_requests == 0
 
     async def test_unique_request_id_constraint(self, pg_engine: AsyncEngine) -> None:
