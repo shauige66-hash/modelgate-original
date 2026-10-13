@@ -1,0 +1,74 @@
+# ModelGate 本地编排：FastAPI + PostgreSQL
+#
+# 启动：docker compose up --build
+# 停止：docker compose down
+# 清空数据：docker compose down -v
+#
+# 注意：本文件不写死任何真实密钥。
+# 密钥从项目根目录的 .env 读取（可从 .env.example 复制）。
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: modelgate-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-modelgate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-modelgate}
+      POSTGRES_DB: ${POSTGRES_DB:-modelgate}
+    ports:
+      # 暴露到宿主机便于用 DBeaver / psql 直接连
+      - "5432:5432"
+    volumes:
+      - modelgate_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 用容器内的 postgres 用户做真实查询，比 pg_isready 更能反映「可接受连接」
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-modelgate} -d ${POSTGRES_DB:-modelgate}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - modelgate
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modelgate-api
+    restart: unless-stopped
+    # 等数据库真正健康后再启动应用，避免应用启动时连不上库
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # 容器内部通过服务名 db 访问数据库
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-modelgate}:${POSTGRES_PASSWORD:-modelgate}@db:5432/${POSTGRES_DB:-modelgate}
+      # 以下变量从 .env 透传；未设置时使用代码内的默认值
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://api.deepseek.com}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
+      UPSTREAM_MODEL: ${UPSTREAM_MODEL:-deepseek-chat}
+      UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-60}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-8}
+      CONCURRENCY_ACQUIRE_TIMEOUT_SECONDS: ${CONCURRENCY_ACQUIRE_TIMEOUT_SECONDS:-10}
+      CLIENT_API_KEYS: ${CLIENT_API_KEYS:-sk-client-local-dev-key}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-sk-admin-local-dev-key}
+      PRICE_INPUT_PER_MILLION_USD: ${PRICE_INPUT_PER_MILLION_USD:-0.27}
+      PRICE_OUTPUT_PER_MILLION_USD: ${PRICE_OUTPUT_PER_MILLION_USD:-1.10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    networks:
+      - modelgate
+
+volumes:
+  modelgate_pgdata:
+    driver: local
+
+networks:
+  modelgate:
+    driver: bridge

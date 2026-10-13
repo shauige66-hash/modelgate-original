@@ -1,0 +1,30 @@
+# 构建镜像时排除的文件，减小构建上下文并避免泄露密钥
+
+# 虚拟环境（镜像内会重新安装依赖）
+.venv/
+venv/
+env/
+
+# 密钥与本地环境变量：绝不能进镜像
+.env
+.env.*
+
+# 测试与缓存
+tests/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 文档与本地数据
+README.md
+*.md
+*.db
+*.sqlite3
