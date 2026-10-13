@@ -1,0 +1,598 @@
+{
+  "label": "acceptance",
+  "captured_at": "2026-10-13T06:41:35.584071+00:00",
+  "environment": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.9",
+    "cpu_count": 16,
+    "mock_latency_ms": 30.0,
+    "gateway": {
+      "max_concurrent_requests": "64",
+      "db_pool_size": "10",
+      "db_max_overflow": "20",
+      "upstream_timeout_s": 30,
+      "processes": 1
+    },
+    "load_generator": {
+      "client_reused_across_rounds": true,
+      "max_connections": 100
+    },
+    "caveat": "本机 Mock 压测。负载生成器、网关、Mock 上游与 PostgreSQL 同机运行，不代表真实模型服务或线上生产环境的表现。"
+  },
+  "scenarios": {
+    "quota_off": {
+      "label": "quota_off",
+      "levels": {
+        "c10": {
+          "concurrency": 10,
+          "rounds": [
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 14.37,
+              "rps": 69.6,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 139.0,
+                "p95": 179.7,
+                "p99": 286.1,
+                "max": 380.8
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 12,
+                "active": 4,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 15.08,
+              "rps": 66.3,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 148.4,
+                "p95": 188.8,
+                "p99": 216.0,
+                "max": 234.5
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 11,
+                "active": 2,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 16.63,
+              "rps": 60.1,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 162.4,
+                "p95": 211.1,
+                "p99": 239.2,
+                "max": 255.6
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 11,
+                "active": 3,
+                "lock_wait": 0
+              }
+            }
+          ],
+          "median_rps": 66.3,
+          "rps_all": [
+            60.1,
+            66.3,
+            69.6
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 44697,
+            "with_tokens": 44324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 11,
+            "active": 3,
+            "lock_wait": 0
+          }
+        },
+        "c20": {
+          "concurrency": 20,
+          "rounds": [
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 15.88,
+              "rps": 63.0,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 314.9,
+                "p95": 371.4,
+                "p99": 508.9,
+                "max": 600.9
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 18,
+                "active": 5,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 15.15,
+              "rps": 66.0,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 289.2,
+                "p95": 422.0,
+                "p99": 506.8,
+                "max": 558.4
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 16,
+                "active": 5,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 16.19,
+              "rps": 61.8,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 315.9,
+                "p95": 408.8,
+                "p99": 457.1,
+                "max": 491.3
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 15,
+                "active": 4,
+                "lock_wait": 0
+              }
+            }
+          ],
+          "median_rps": 63.0,
+          "rps_all": [
+            61.8,
+            63.0,
+            66.0
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 47697,
+            "with_tokens": 47324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 15,
+            "active": 4,
+            "lock_wait": 0
+          }
+        },
+        "c50": {
+          "concurrency": 50,
+          "rounds": [
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 15.94,
+              "rps": 62.7,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 771.8,
+                "p95": 961.6,
+                "p99": 1270.8,
+                "max": 1395.7
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 23,
+                "active": 6,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 15.61,
+              "rps": 64.1,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 774.7,
+                "p95": 936.3,
+                "p99": 1057.0,
+                "max": 1120.7
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 30,
+                "active": 4,
+                "lock_wait": 0
+              }
+            },
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 15.26,
+              "rps": 65.5,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 738.8,
+                "p95": 911.7,
+                "p99": 1053.7,
+                "max": 1149.3
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 29,
+                "active": 5,
+                "lock_wait": 0
+              }
+            }
+          ],
+          "median_rps": 64.1,
+          "rps_all": [
+            62.7,
+            64.1,
+            65.5
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 50697,
+            "with_tokens": 50324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 29,
+            "active": 5,
+            "lock_wait": 0
+          }
+        }
+      }
+    },
+    "quota_on": {
+      "label": "quota_on",
+      "levels": {
+        "c10": {
+          "concurrency": 10,
+          "rounds": [
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 20.05,
+              "rps": 49.9,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 196.5,
+                "p95": 253.4,
+                "p99": 318.3,
+                "max": 362.3
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 12,
+                "active": 3,
+                "lock_wait": 1
+              }
+            },
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 19.72,
+              "rps": 50.7,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 196.2,
+                "p95": 235.0,
+                "p99": 250.9,
+                "max": 298.7
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 11,
+                "active": 4,
+                "lock_wait": 2
+              }
+            },
+            {
+              "concurrency": 10,
+              "requests": 1000,
+              "wall_s": 18.86,
+              "rps": 53.0,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 187.1,
+                "p95": 224.8,
+                "p99": 270.4,
+                "max": 320.6
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 11,
+                "active": 4,
+                "lock_wait": 2
+              }
+            }
+          ],
+          "median_rps": 50.7,
+          "rps_all": [
+            49.9,
+            50.7,
+            53.0
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 53697,
+            "with_tokens": 53324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 11,
+            "active": 4,
+            "lock_wait": 2
+          }
+        },
+        "c20": {
+          "concurrency": 20,
+          "rounds": [
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 19.95,
+              "rps": 50.1,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 391.1,
+                "p95": 463.1,
+                "p99": 530.0,
+                "max": 611.4
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 20,
+                "active": 13,
+                "lock_wait": 11
+              }
+            },
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 22.76,
+              "rps": 43.9,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 438.9,
+                "p95": 540.3,
+                "p99": 786.1,
+                "max": 1023.5
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 21,
+                "active": 10,
+                "lock_wait": 9
+              }
+            },
+            {
+              "concurrency": 20,
+              "requests": 1000,
+              "wall_s": 24.13,
+              "rps": 41.4,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 453.4,
+                "p95": 650.1,
+                "p99": 1062.1,
+                "max": 1529.4
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 20,
+                "active": 12,
+                "lock_wait": 7
+              }
+            }
+          ],
+          "median_rps": 43.9,
+          "rps_all": [
+            41.4,
+            43.9,
+            50.1
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 56697,
+            "with_tokens": 56324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 20,
+            "active": 12,
+            "lock_wait": 7
+          }
+        },
+        "c50": {
+          "concurrency": 50,
+          "rounds": [
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 22.58,
+              "rps": 44.3,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 798.2,
+                "p95": 2993.6,
+                "p99": 4739.7,
+                "max": 7016.2
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 32,
+                "active": 26,
+                "lock_wait": 22
+              }
+            },
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 20.65,
+              "rps": 48.4,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 724.0,
+                "p95": 2527.2,
+                "p99": 3854.3,
+                "max": 7156.3
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 31,
+                "active": 27,
+                "lock_wait": 25
+              }
+            },
+            {
+              "concurrency": 50,
+              "requests": 1000,
+              "wall_s": 20.18,
+              "rps": 49.5,
+              "ok": 1000,
+              "error_rate": 0.0,
+              "latency_ms": {
+                "p50": 711.8,
+                "p95": 2328.3,
+                "p99": 3679.8,
+                "max": 7209.9
+              },
+              "status_counts": {
+                "200": 1000
+              },
+              "failure_kinds": {},
+              "pg_peak": {
+                "total": 31,
+                "active": 25,
+                "lock_wait": 23
+              }
+            }
+          ],
+          "median_rps": 48.4,
+          "rps_all": [
+            44.3,
+            48.4,
+            49.5
+          ],
+          "total_requests": 3000,
+          "total_ok": 3000,
+          "error_rate": 0.0,
+          "failure_kinds": {},
+          "db_after_last_round": {
+            "call_records": 59697,
+            "with_tokens": 59324,
+            "with_retries": 0
+          },
+          "pg_peak": {
+            "total": 31,
+            "active": 25,
+            "lock_wait": 23
+          }
+        }
+      }
+    }
+  }
+}
