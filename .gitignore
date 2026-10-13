@@ -31,6 +31,11 @@ htmlcov/
 *.db
 *.sqlite3
 
+# 测试与基准的临时产物（日志、临时数据卷导出等）
+benchmarks/_*.log
+tests/_*.log
+*.tmp
+
 # Editor / OS
 .vscode/
 .idea/
