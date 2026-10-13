@@ -52,11 +52,20 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     )
 
 
-async def init_models(engine: AsyncEngine) -> None:
-    """建表。项目规模小，用 create_all 而非 Alembic 迁移（局限见 README）。"""
+async def init_models(engine: AsyncEngine) -> list[str]:
+    """建表并补齐缺失的列与索引。
+
+    create_all 只创建不存在的表，对已存在的表不会加列，
+    因此已有库需要再跑一次增量迁移（见 app/db/migrations.py）。
+    """
+    from app.db.migrations import apply_additive_migrations
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("数据库表已就绪（create_all）")
+
+    applied = await apply_additive_migrations(engine)
+    logger.info("数据库表已就绪（create_all + 增量迁移）")
+    return applied
 
 
 async def dispose_engine(engine: AsyncEngine) -> None:
